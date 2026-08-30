@@ -1,0 +1,32 @@
+﻿# ===== Unity 编辑器工具合集 (.gitignore) =====
+# 本仓库存放的是 Unity Editor 扩展脚本，会被复制进各个 Unity 工程使用。
+# Unity 在导入时会按工程生成 .meta，因此这里不忽略 *.meta。
+
+# --- IDE / 编辑器杂项 ---
+.vs/
+.idea/
+.vscode/
+*.csproj
+*.sln
+*.suo
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.opendb
+*.VC.db
+
+# --- OS 杂项 ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- 若以后把整个 Unity 工程纳入本仓库，再启用以下规则 ---
+# [Ll]ibrary/
+# [Tt]emp/
+# [Oo]bj/
+# [Bb]uild/
+# [Bb]uilds/
+# [Ll]ogs/
+# [Uu]ser[Ss]ettings/
