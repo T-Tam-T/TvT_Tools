@@ -1,0 +1,8 @@
+﻿# 统一换行符规则（Windows 上避免 LF/CRLF 警告）
+* text=auto
+*.cs text eol=lf
+*.asmdef text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.asset text eol=lf
+*.preset text eol=lf
