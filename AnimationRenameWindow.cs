@@ -8,16 +8,22 @@ using System.Text.RegularExpressions;
 /// <summary>
 /// 批量改名（动画保持）
 ///
-/// 把需要处理的动画剪辑（AnimationClip 资产）和“挂载该剪辑的对象”（通常带 Animator / Animation 组件）
-/// 放入本窗口。工具会识别挂载对象及其整个子层级内的所有 GameObject 名称，按规则批量改名，
-/// 并同步改写动画剪辑内部的曲线绑定路径（EditorCurveBinding.path），
-/// 确保改名后动画仍然指向改名后的对象、不丢失动画目标。
+/// 布局（参考示意图）：
+///   左栏：
+///     - 重命名规则
+///     - 场景对象/预制体拖拽区域
+///     - 对象列表（下拉式：每个对象一个折叠头，其下排列它状态机里检测到的动画剪辑）
+///   右栏：
+///     - 识别到的对象（含子层级）预览：原名称 → 改名后
+///     - 应用按钮
 ///
-/// 用法：
-///  1. 把动画剪辑拖到“动画剪辑”区域，或选中后点“添加选中”。
-///  2. 把挂载对象（场景里的 GameObject）拖到“挂载对象”区域，或选中后点“添加选中”。
-///  3. 选择重命名规则，在“识别到的对象”区预览改名效果。
-///  4. 点“应用改名”，工具会批量改名并同步更新所选剪辑的动画绑定路径。
+/// 动画剪辑通过对象上的 Animator（AnimatorController 状态机，含 BlenderTree / 覆盖动画）
+/// 或旧版 Animation 组件自动检测，多个剪辑会依次排列在对象下面。
+/// 每个剪辑行：左侧为剪辑名称（左对齐），右侧为时长 / FPS / 是否循环 / 资源框（右对齐）。
+/// 当窗口较窄时，右侧不显示内联信息，改为可展开的详情（时长 / FPS / 循环 / 帧数）。
+///
+/// 改名时会同步改写对应动画剪辑内部的曲线绑定路径（EditorCurveBinding.path），
+/// 确保改名后动画仍指向改名后的对象、不丢失动画目标。
 /// </summary>
 public class AnimationRenameWindow : EditorWindow
 {
@@ -34,20 +40,37 @@ public class AnimationRenameWindow : EditorWindow
     private int step = 1;
     private int padding = 0;
 
-    private List<AnimationClip> clips = new List<AnimationClip>();
-    private List<GameObject> mounts = new List<GameObject>();
+    /// <summary>一条记录：对象 + 检测到的动画剪辑列表。</summary>
+    private class Entry
+    {
+        public GameObject obj;
+        public bool expanded = true;                // 对象折叠头是否展开
+        public List<ClipInfo> clips = new List<ClipInfo>();
+    }
+
+    /// <summary>一个动画剪辑的信息（名称 / 时长 / FPS / 循环等展示用）。</summary>
+    private class ClipInfo
+    {
+        public AnimationClip clip;
+        public bool expanded;                       // 剪辑折叠是否展开（显示详情）
+        public string usagePath = "Animator Controller";
+    }
+
+    /// <summary>一条记录在改名前的路径映射快照：剪辑 + 旧路径→新路径映射。</summary>
+    private class EntryRemap
+    {
+        public List<ClipInfo> clips = new List<ClipInfo>();
+        public Dictionary<string, string> pathRemap = new Dictionary<string, string>();
+    }
+
+    private List<Entry> entries = new List<Entry>();
     private List<GameObject> targets = new List<GameObject>();
     private string statusMessage = "";
 
-    private Vector2 contentScrollPos;
-    private Vector2 clipsScrollPos;
-    private Vector2 mountsScrollPos;
+    private Vector2 entryScrollPos;
     private Vector2 previewScrollPos;
-    private bool isDraggingSplitter;
-    private float rulesPanelHeight = 260f;
-    private const float SplitterHeight = 6f;
-    private const float MinRulesHeight = 100f;
-    private const float MinPreviewHeight = 80f;
+    private float leftPaneWidth = 420f;
+    private readonly Dictionary<GameObject, string> customNames = new Dictionary<GameObject, string>();
 
     [MenuItem("Tools/TvTTools/批量改名(动画保持)", false, 20)]
     private static void ShowWindow()
@@ -64,28 +87,39 @@ public class AnimationRenameWindow : EditorWindow
     private static void OpenWindow()
     {
         var window = GetWindow<AnimationRenameWindow>("批量改名(动画保持)");
-        window.minSize = new Vector2(540, 470);
+        window.minSize = new Vector2(760, 500);
         window.Show();
 
-        // 打开窗口时，把当前选中的动画剪辑 / 场景对象直接带进来
+        // 打开窗口时，把当前选中的场景对象 / 动画剪辑直接带进来
+        AnimationClip selectedClip = null;
         foreach (var o in Selection.objects)
         {
-            if (o is AnimationClip ac)
-                window.AddClip(ac);
-            else if (o is GameObject go && !AssetDatabase.Contains(go))
-                window.AddMount(go);
+            if (o is AnimationClip c) { selectedClip = c; break; }
+        }
+        foreach (var o in Selection.objects)
+        {
+            if (o is GameObject go && !AssetDatabase.Contains(go))
+                window.AddEntry(go, selectedClip);
         }
         window.RebuildTargets();
     }
 
-    private void AddClip(AnimationClip clip)
+    private void AddEntry(GameObject go, AnimationClip clip)
     {
-        if (clip != null && !clips.Contains(clip)) clips.Add(clip);
-    }
-
-    private void AddMount(GameObject go)
-    {
-        if (go != null && !mounts.Contains(go)) mounts.Add(go);
+        if (go == null) return;
+        var existing = entries.FirstOrDefault(en => en.obj == go);
+        if (existing != null)
+        {
+            // 若手动给了剪辑且该剪辑尚未被检测到，则补充进去
+            if (clip != null && !existing.clips.Exists(ci => ci.clip == clip))
+                existing.clips.Add(new ClipInfo { clip = clip, usagePath = "手动设置" });
+            return;
+        }
+        var entry = new Entry { obj = go };
+        RefreshClips(entry);
+        if (clip != null && !entry.clips.Exists(ci => ci.clip == clip))
+            entry.clips.Insert(0, new ClipInfo { clip = clip, usagePath = "手动设置" });
+        entries.Add(entry);
     }
 
     private void OnSelectionChange()
@@ -99,152 +133,44 @@ public class AnimationRenameWindow : EditorWindow
 
     private void OnGUI()
     {
-        GUILayout.Space(8);
-        EditorGUILayout.LabelField("批量改名（动画保持）", EditorStyles.boldLabel);
-        EditorGUILayout.HelpBox(
-            "放入动画剪辑（AnimationClip）与挂载该剪辑的对象（带 Animator / Animation 组件的场景对象）。\n" +
-            "工具会识别该对象及子层级内的全部名称，按规则改名后同步更新剪辑的动画绑定路径，改名后动画不丢失。",
-            MessageType.Info);
+        GUILayout.Space(4);
+        EditorGUILayout.LabelField(
+            "拖入场景对象/预制体，工具会通过状态机自动检测其动画剪辑；按规则改名后会自动更新动画绑定路径（动画对象不丢失）。",
+            EditorStyles.miniLabel);
+        GUILayout.Space(2);
 
-        float totalHeight = Mathf.Max(position.height - 110f, 260f);
-        float maxRulesHeight = totalHeight - MinPreviewHeight - SplitterHeight;
+        float leftWidth = Mathf.Max(340f, position.width * 0.55f);
+        leftPaneWidth = leftWidth;
 
-        rulesPanelHeight = Mathf.Clamp(rulesPanelHeight, MinRulesHeight, maxRulesHeight);
+        EditorGUILayout.BeginHorizontal();
 
-        // ========== 上半部分：配置 + 规则（可拖动高度） ==========
-        EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.Height(rulesPanelHeight));
-        contentScrollPos = EditorGUILayout.BeginScrollView(contentScrollPos);
-
-        DrawClipsList();
-        GUILayout.Space(8);
-        DrawMountsList();
-        GUILayout.Space(8);
-        DrawRule();
-
-        EditorGUILayout.EndScrollView();
-        EditorGUILayout.EndVertical();
-
-        // ========== 可拖动分割条 ==========
-        Rect splitterRect = GUILayoutUtility.GetRect(10, SplitterHeight, GUILayout.ExpandWidth(true));
-        EditorGUIUtility.AddCursorRect(splitterRect, MouseCursor.ResizeVertical);
-        if (Event.current.type == EventType.Repaint)
-            EditorGUI.DrawRect(splitterRect, new Color(0.5f, 0.5f, 0.5f, 0.5f));
-        if (Event.current.type == EventType.MouseDown && splitterRect.Contains(Event.current.mousePosition))
-        {
-            isDraggingSplitter = true;
-            Event.current.Use();
-        }
-        if (isDraggingSplitter && Event.current.type == EventType.MouseDrag)
-        {
-            rulesPanelHeight += Event.current.delta.y;
-            rulesPanelHeight = Mathf.Clamp(rulesPanelHeight, MinRulesHeight, maxRulesHeight);
-            Event.current.Use();
-            Repaint();
-        }
-        if (Event.current.type == EventType.MouseUp)
-        {
-            isDraggingSplitter = false;
-        }
-
-        // ========== 下半部分：识别结果预览（占满剩余空间） ==========
-        EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.ExpandHeight(true));
-        GUILayout.BeginHorizontal();
-        EditorGUILayout.LabelField($"识别到的对象（共 {targets.Count} 个，含挂载对象及子层级）", EditorStyles.boldLabel);
-        if (GUILayout.Button("重新识别", GUILayout.Width(80)))
-        {
-            RebuildTargets();
-            Repaint();
-        }
-        GUILayout.EndHorizontal();
-        DrawPreview();
+        // ================= 左栏 =================
+        EditorGUILayout.BeginVertical(GUILayout.Width(leftWidth));
+        DrawRulePanel();
+        GUILayout.Space(6);
+        DrawDropZone();
+        GUILayout.Space(6);
+        DrawEntryList();
         EditorGUILayout.EndVertical();
 
         GUILayout.Space(6);
-        DrawApplyButton();
 
+        // ================= 右栏 =================
+        EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true));
+        DrawPreview();
+        GUILayout.Space(6);
+        DrawApplyButton();
         if (!string.IsNullOrEmpty(statusMessage))
             EditorGUILayout.HelpBox(statusMessage, MessageType.None);
+        EditorGUILayout.EndVertical();
+
+        EditorGUILayout.EndHorizontal();
     }
 
-    private void DrawClipsList()
+    private void DrawRulePanel()
     {
-        EditorGUILayout.LabelField("① 动画剪辑 (AnimationClip)", EditorStyles.boldLabel);
-        GUILayout.BeginHorizontal();
-        if (GUILayout.Button("添加选中", GUILayout.Width(80)))
-        {
-            foreach (var o in Selection.objects)
-                if (o is AnimationClip ac) AddClip(ac);
-        }
-        if (GUILayout.Button("清空", GUILayout.Width(60)))
-            clips.Clear();
-        GUILayout.Label("（可把动画文件拖到下方区域）", EditorStyles.miniLabel);
-        GUILayout.EndHorizontal();
-
-        Rect dropRect = GUILayoutUtility.GetRect(10, 90, GUILayout.ExpandWidth(true));
-        HandleClipDragDrop(dropRect);
-        GUILayout.BeginArea(dropRect, EditorStyles.helpBox);
-        clipsScrollPos = GUILayout.BeginScrollView(clipsScrollPos);
-        for (int i = 0; i < clips.Count; i++)
-        {
-            GUILayout.BeginHorizontal();
-            GUILayout.Label(clips[i] != null ? clips[i].name : "<已丢失>");
-            if (GUILayout.Button("移除", GUILayout.Width(50)))
-            {
-                clips.RemoveAt(i);
-                i--;
-            }
-            GUILayout.EndHorizontal();
-        }
-        if (clips.Count == 0)
-            GUILayout.Label("尚未添加动画剪辑，可拖拽或点“添加选中”", EditorStyles.centeredGreyMiniLabel);
-        GUILayout.EndScrollView();
-        GUILayout.EndArea();
-    }
-
-    private void DrawMountsList()
-    {
-        EditorGUILayout.LabelField("② 挂载动画剪辑的对象 (挂载对象/带 Animator 或 Animation 组件)", EditorStyles.boldLabel);
-        GUILayout.BeginHorizontal();
-        if (GUILayout.Button("添加选中", GUILayout.Width(80)))
-        {
-            foreach (var o in Selection.objects)
-                if (o is GameObject go && !AssetDatabase.Contains(go)) AddMount(go);
-            RebuildTargets();
-        }
-        if (GUILayout.Button("清空", GUILayout.Width(60)))
-        {
-            mounts.Clear();
-            RebuildTargets();
-        }
-        GUILayout.Label("（可把场景对象拖到下方区域）", EditorStyles.miniLabel);
-        GUILayout.EndHorizontal();
-
-        Rect dropRect = GUILayoutUtility.GetRect(10, 90, GUILayout.ExpandWidth(true));
-        HandleMountDragDrop(dropRect);
-        GUILayout.BeginArea(dropRect, EditorStyles.helpBox);
-        mountsScrollPos = GUILayout.BeginScrollView(mountsScrollPos);
-        for (int i = 0; i < mounts.Count; i++)
-        {
-            GUILayout.BeginHorizontal();
-            GUILayout.Label(mounts[i] != null ? mounts[i].name : "<已丢失>");
-            if (GUILayout.Button("移除", GUILayout.Width(50)))
-            {
-                mounts.RemoveAt(i);
-                RebuildTargets();
-                i--;
-            }
-            GUILayout.EndHorizontal();
-        }
-        if (mounts.Count == 0)
-            GUILayout.Label("尚未添加挂载对象，可拖拽或点“添加选中”", EditorStyles.centeredGreyMiniLabel);
-        GUILayout.EndScrollView();
-        GUILayout.EndArea();
-    }
-
-    private void DrawRule()
-    {
-        GUILayout.Space(2);
-        EditorGUILayout.LabelField("③ 重命名规则", EditorStyles.boldLabel);
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+        EditorGUILayout.LabelField("重命名规则", EditorStyles.boldLabel);
         currentMode = (RenameMode)EditorGUILayout.EnumPopup("重命名模式", currentMode);
         GUILayout.Space(4);
 
@@ -263,6 +189,7 @@ public class AnimationRenameWindow : EditorWindow
                 DrawSequenceRule();
                 break;
         }
+        EditorGUILayout.EndVertical();
     }
 
     private void DrawReplaceRule()
@@ -302,10 +229,199 @@ public class AnimationRenameWindow : EditorWindow
         padding = EditorGUILayout.IntField("数字位数:", padding);
     }
 
+    private static GUIStyle _roundedDropStyle;
+
+    /// <summary>
+    /// 缓存一个可 9 宫格拉伸的圆角底样式：填充 rgb(64,64,64)、边框 rgb(35,35,35)、带圆角。
+    /// 用 9 宫格（style.border）拉伸，任意宽高都能保持圆角不变形。
+    /// </summary>
+    private static GUIStyle RoundedDropStyle()
+    {
+        if (_roundedDropStyle != null) return _roundedDropStyle;
+
+        const int s = 32;
+        const float r = 6f;      // 圆角半径（纹理像素）
+        const float bw = 1.6f;   // 边框宽度（纹理像素）
+        Color fill = new Color(64f / 255f, 64f / 255f, 64f / 255f, 1f);
+        Color border = new Color(35f / 255f, 35f / 255f, 35f / 255f, 1f);
+
+        var tex = new Texture2D(s, s, TextureFormat.RGBA32, false);
+        tex.wrapMode = TextureWrapMode.Clamp;
+        tex.filterMode = FilterMode.Bilinear;
+        var px = new Color[s * s];
+        for (int y = 0; y < s; y++)
+        {
+            for (int x = 0; x < s; x++)
+            {
+                float u = (x + 0.5f) / s;
+                float v = (y + 0.5f) / s;
+                float pxc = u * s - s * 0.5f;
+                float pyc = v * s - s * 0.5f;
+                float qx = Mathf.Abs(pxc) - (s * 0.5f - r);
+                float qy = Mathf.Abs(pyc) - (s * 0.5f - r);
+                float qx0 = Mathf.Max(qx, 0f);
+                float qy0 = Mathf.Max(qy, 0f);
+                float dist = Mathf.Sqrt(qx0 * qx0 + qy0 * qy0) - r;  // 圆角矩形有符号距离
+                float alpha = Mathf.Clamp01(0.5f - dist);
+                if (alpha <= 0f) { px[y * s + x] = new Color(0f, 0f, 0f, 0f); continue; }
+                Color c = (dist > -bw) ? border : fill;
+                c.a = alpha;
+                px[y * s + x] = c;
+            }
+        }
+        tex.SetPixels(px);
+        tex.Apply();
+
+        var style = new GUIStyle();
+        style.normal.background = tex;
+        int corner = Mathf.RoundToInt(r);
+        style.border.left = corner; style.border.right = corner;
+        style.border.top = corner; style.border.bottom = corner;
+        style.padding.left = 0; style.padding.right = 0;
+        style.padding.top = 0; style.padding.bottom = 0;
+        style.margin.left = 0; style.margin.right = 0;
+        style.margin.top = 0; style.margin.bottom = 0;
+        _roundedDropStyle = style;
+        return _roundedDropStyle;
+    }
+
+    private static GUIStyle _wrappedBoldLabel;
+
+    /// <summary>可换行的加粗标签样式（用于避免标题被截断）。</summary>
+    private static GUIStyle WrappedBoldLabel()
+    {
+        if (_wrappedBoldLabel == null)
+            _wrappedBoldLabel = new GUIStyle(EditorStyles.boldLabel) { wordWrap = true };
+        return _wrappedBoldLabel;
+    }
+
+    private void DrawDropZone()
+    {
+        GUILayout.BeginHorizontal();
+        EditorGUILayout.LabelField("场景对象/预制体拖拽区域", EditorStyles.boldLabel);
+        GUILayout.FlexibleSpace();
+        if (GUILayout.Button("添加选中对象", GUILayout.Width(96)))
+            AddSelectedObjects();
+        GUILayout.EndHorizontal();
+
+        Rect dropRect = GUILayoutUtility.GetRect(10, 76, GUILayout.ExpandWidth(true));
+        HandleObjectDrop(dropRect);
+
+        // 圆角浅色底 + 边框示意拖拽区
+        GUI.Box(dropRect, GUIContent.none, RoundedDropStyle());
+
+        GUILayout.BeginArea(dropRect);
+        GUILayout.Label("把场景里的对象 / 预制体拖到这里", EditorStyles.centeredGreyMiniLabel);
+        GUILayout.Label("（工具会识别其子层级名称，并经状态机检测动画）", EditorStyles.centeredGreyMiniLabel);
+        GUILayout.EndArea();
+    }
+
+    private void DrawEntryList()
+    {
+        GUILayout.BeginHorizontal();
+        EditorGUILayout.LabelField("对象列表", EditorStyles.boldLabel);
+        GUILayout.FlexibleSpace();
+        if (GUILayout.Button("重新检测", GUILayout.Width(80)))
+        {
+            foreach (var e in entries) RefreshClips(e);
+            Repaint();
+        }
+        if (GUILayout.Button("清空列表", GUILayout.Width(80)))
+        {
+            entries.Clear();
+            RebuildTargets();
+        }
+        GUILayout.EndHorizontal();
+
+        // 窗口较窄时，隐藏右侧内联信息，改为可展开的详情（时长/FPS/循环/帧数）
+        bool showInlineInfo = leftPaneWidth >= 480f;
+
+        entryScrollPos = EditorGUILayout.BeginScrollView(entryScrollPos, GUILayout.ExpandHeight(true));
+        for (int i = 0; i < entries.Count; i++)
+        {
+            var e = entries[i];
+            if (e.obj == null)
+            {
+                GUILayout.Label("<已丢失对象>", EditorStyles.centeredGreyMiniLabel);
+                continue;
+            }
+
+            // ---- 对象折叠头 ----
+            GUILayout.BeginHorizontal();
+            e.expanded = GUILayout.Toggle(e.expanded, new GUIContent($"{e.obj.name}（{e.clips.Count} 个动画）"), EditorStyles.foldout, GUILayout.ExpandWidth(false));
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button("✕", GUILayout.Width(24)))
+            {
+                entries.RemoveAt(i);
+                RebuildTargets();
+                GUILayout.EndHorizontal();
+                i--;
+                continue;
+            }
+            GUILayout.EndHorizontal();
+
+            // ---- 对象下的剪辑列表 ----
+            if (!e.expanded)
+                continue;
+
+            for (int j = 0; j < e.clips.Count; j++)
+            {
+                var ci = e.clips[j];
+                GUILayout.BeginHorizontal();
+                GUILayout.Space(14); // 层级缩进（剪辑行）
+                ci.expanded = GUILayout.Toggle(ci.expanded, new GUIContent(ci.clip != null ? ci.clip.name : "<空>"), EditorStyles.foldout, GUILayout.ExpandWidth(false));
+                GUILayout.FlexibleSpace();
+                if (showInlineInfo && ci.clip != null)
+                {
+                    GUILayout.Label($"时长: {ci.clip.length:0.##}s", EditorStyles.miniLabel);
+                    GUILayout.Label($"FPS: {ci.clip.frameRate:0}", EditorStyles.miniLabel);
+                    GUILayout.Label($"循环: {LoopText(ci.clip)}", EditorStyles.miniLabel);
+                }
+                ci.clip = (AnimationClip)EditorGUILayout.ObjectField(ci.clip, typeof(AnimationClip), false, GUILayout.Width(160));
+                GUILayout.EndHorizontal();
+
+                // ---- 剪辑详情（可展开） ----
+                if (ci.expanded && ci.clip != null)
+                {
+                    EditorGUI.indentLevel += 2;
+                    EditorGUILayout.LabelField("时长", $"{ci.clip.length:0.##}s");
+                    EditorGUILayout.LabelField("FPS", $"{ci.clip.frameRate:0}");
+                    EditorGUILayout.LabelField("循环", LoopText(ci.clip));
+                    EditorGUILayout.LabelField("帧数", $"{Mathf.RoundToInt(ci.clip.length * ci.clip.frameRate)}");
+                    EditorGUI.indentLevel -= 2;
+                }
+            }
+
+            GUILayout.Space(4);
+        }
+        if (entries.Count == 0)
+            GUILayout.Label("列表为空：在蓝色区域拖入对象/预制体，或点“添加选中对象”", EditorStyles.centeredGreyMiniLabel);
+        EditorGUILayout.EndScrollView();
+    }
+
+    private string LoopText(AnimationClip clip)
+    {
+        return clip != null && clip.isLooping ? "是" : "否";
+    }
+
     private void DrawPreview()
     {
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox, GUILayout.ExpandHeight(true));
+        GUILayout.BeginHorizontal();
+        GUILayout.Label($"识别到的对象（共 {targets.Count} 个，含挂载对象及子层级）", WrappedBoldLabel(), GUILayout.ExpandWidth(true));
+        if (GUILayout.Button("重新识别", GUILayout.Width(80)))
+        {
+            RebuildTargets();
+            Repaint();
+        }
+        GUILayout.EndHorizontal();
+
         previewScrollPos = EditorGUILayout.BeginScrollView(previewScrollPos, GUILayout.ExpandHeight(true));
-        float halfWidth = (EditorGUIUtility.currentViewWidth - 40) * 0.5f;
+
+        // 右栏（预览）的可用宽度 = 窗口宽度 - 左栏宽度 - 间距
+        float paneWidth = Mathf.Max(position.width - leftPaneWidth - 16f, 300f);
+        float halfWidth = (paneWidth - 40f) * 0.5f;
+
         EditorGUILayout.BeginHorizontal();
 
         EditorGUILayout.BeginVertical(GUILayout.Width(halfWidth));
@@ -318,16 +434,26 @@ public class AnimationRenameWindow : EditorWindow
         EditorGUILayout.EndVertical();
 
         EditorGUILayout.BeginVertical(GUILayout.Width(halfWidth));
-        EditorGUILayout.LabelField("改名后", EditorStyles.miniBoldLabel);
+        EditorGUILayout.LabelField("改名后（可直接输入修改）", EditorStyles.miniBoldLabel);
         for (int i = 0; i < targets.Count; i++)
         {
-            string name = targets[i] != null ? GetNewName(targets[i].name, i) : "";
-            EditorGUILayout.LabelField(FormatNameForDisplay(name), EditorStyles.wordWrappedLabel);
+            var go = targets[i];
+            if (go == null) { EditorGUILayout.TextField(""); continue; }
+            string effective = GetEffectiveNewName(go, i);
+            string edited = EditorGUILayout.TextField(effective, GUILayout.Width(halfWidth));
+            if (edited != effective)
+            {
+                if (string.IsNullOrEmpty(edited))
+                    customNames.Remove(go);
+                else
+                    customNames[go] = edited;
+            }
         }
         EditorGUILayout.EndVertical();
 
         EditorGUILayout.EndHorizontal();
         EditorGUILayout.EndScrollView();
+        EditorGUILayout.EndVertical();
     }
 
     private void DrawApplyButton()
@@ -348,7 +474,7 @@ public class AnimationRenameWindow : EditorWindow
     //  拖拽
     // =============================================================
 
-    private void HandleClipDragDrop(Rect dropRect)
+    private void HandleObjectDrop(Rect dropRect)
     {
         var evt = Event.current;
         if (!dropRect.Contains(evt.mousePosition)) return;
@@ -363,31 +489,124 @@ public class AnimationRenameWindow : EditorWindow
             DragAndDrop.AcceptDrag();
             foreach (var o in DragAndDrop.objectReferences)
             {
-                if (o is AnimationClip ac) AddClip(ac);
+                if (o is GameObject go && !AssetDatabase.Contains(go)) AddEntry(go, null);
             }
+            RebuildTargets();
             evt.Use();
         }
     }
 
-    private void HandleMountDragDrop(Rect dropRect)
+    private void AddSelectedObjects()
     {
-        var evt = Event.current;
-        if (!dropRect.Contains(evt.mousePosition)) return;
-
-        if (evt.type == EventType.DragUpdated)
+        AnimationClip selectedClip = null;
+        foreach (var o in Selection.objects)
         {
-            DragAndDrop.visualMode = DragAndDropVisualMode.Generic;
-            evt.Use();
+            if (o is AnimationClip c) { selectedClip = c; break; }
         }
-        else if (evt.type == EventType.DragPerform)
+        foreach (var o in Selection.objects)
         {
-            DragAndDrop.AcceptDrag();
-            foreach (var o in DragAndDrop.objectReferences)
+            if (o is GameObject go && !AssetDatabase.Contains(go)) AddEntry(go, selectedClip);
+        }
+        RebuildTargets();
+        Repaint();
+    }
+
+    // =============================================================
+    //  状态机检测动画剪辑
+    // =============================================================
+
+    /// <summary>
+    /// 找到对象自身或其上级父节点上挂载动画（Animator / Animation）的对象，作为动画来源与绑定路径根。
+    /// 若都没找到则退回对象本身，避免漏检。
+    /// </summary>
+    private static GameObject FindAnimationRoot(GameObject go)
+    {
+        var t = go != null ? go.transform : null;
+        while (t != null)
+        {
+            if (t.GetComponent<Animator>() != null || t.GetComponent<Animation>() != null)
+                return t.gameObject;
+            t = t.parent;
+        }
+        return go;
+    }
+
+    /// <summary>根据对象上的 Animator（状态机）/ 旧版 Animation 检测其使用的动画剪辑。</summary>
+    private void RefreshClips(Entry entry)
+    {
+        if (entry == null || entry.obj == null) return;
+
+        // 保留已有的“展开”状态，按剪辑引用匹配
+        var expandedSet = new HashSet<AnimationClip>();
+        foreach (var ci in entry.clips)
+            if (ci.expanded && ci.clip != null) expandedSet.Add(ci.clip);
+
+        entry.clips.Clear();
+
+        var animRoot = FindAnimationRoot(entry.obj);
+        if (animRoot == null) return;
+
+        var animator = animRoot.GetComponent<Animator>();
+        if (animator != null && animator.runtimeAnimatorController != null)
+        {
+            var list = new List<AnimationClip>();
+            var controller = animator.runtimeAnimatorController;
+
+            // 状态机（含 BlendTree / 子状态机）里的剪辑全部收集，再用 controller.animationClips 兜底，确保不遗漏
+            if (controller is UnityEditor.Animations.AnimatorController ac)
             {
-                if (o is GameObject go && !AssetDatabase.Contains(go)) AddMount(go);
+                foreach (var layer in ac.layers)
+                    CollectStateMachineClips(layer.stateMachine, list);
             }
-            RebuildTargets();
-            evt.Use();
+            foreach (var c in controller.animationClips)
+                if (c != null && !list.Contains(c)) list.Add(c);
+
+            AddClips(entry, list, "Animator Controller", expandedSet);
+        }
+        else
+        {
+            var legacy = animRoot.GetComponent<Animation>();
+            if (legacy != null)
+            {
+                var list = new List<AnimationClip>();
+                foreach (AnimationState st in legacy)
+                    if (st.clip != null && !list.Contains(st.clip)) list.Add(st.clip);
+                AddClips(entry, list, "Animation", expandedSet);
+            }
+        }
+    }
+
+    private void AddClips(Entry entry, List<AnimationClip> clips, string usagePath, HashSet<AnimationClip> expandedSet)
+    {
+        foreach (var c in clips)
+            entry.clips.Add(new ClipInfo { clip = c, expanded = expandedSet.Contains(c), usagePath = usagePath });
+    }
+
+    private static void CollectStateMachineClips(UnityEditor.Animations.AnimatorStateMachine stateMachine, List<AnimationClip> result)
+    {
+        if (stateMachine == null) return;
+        foreach (var childState in stateMachine.states)
+        {
+            if (childState.state == null) continue;
+            CollectMotionClips(childState.state.motion, result);
+        }
+        foreach (var childSM in stateMachine.stateMachines)
+        {
+            if (childSM.stateMachine != null)
+                CollectStateMachineClips(childSM.stateMachine, result);
+        }
+    }
+
+    private static void CollectMotionClips(UnityEngine.Motion motion, List<AnimationClip> result)
+    {
+        if (motion is AnimationClip clip)
+        {
+            if (clip != null && !result.Contains(clip)) result.Add(clip);
+        }
+        else if (motion is UnityEditor.Animations.BlendTree bt)
+        {
+            foreach (var child in bt.children)
+                CollectMotionClips(child.motion, result);
         }
     }
 
@@ -395,19 +614,23 @@ public class AnimationRenameWindow : EditorWindow
     //  逻辑
     // =============================================================
 
-    /// <summary>根据挂载对象，识别出其本身 + 整个子层级内所有的 GameObject。</summary>
+    /// <summary>根据各条记录的对象，识别出其本身 + 整个子层级内所有的 GameObject。</summary>
     private void RebuildTargets()
     {
         targets.Clear();
         var seen = new HashSet<GameObject>();
-        foreach (var m in mounts)
+        foreach (var e in entries)
         {
-            if (m == null) continue;
-            foreach (var t in m.GetComponentsInChildren<Transform>(true))
+            if (e.obj == null) continue;
+            foreach (var t in e.obj.GetComponentsInChildren<Transform>(true))
             {
                 if (seen.Add(t.gameObject)) targets.Add(t.gameObject);
             }
         }
+
+        // 清理已不在识别范围内对象的自定义名称
+        var stale = customNames.Keys.Where(go => go == null || !seen.Contains(go)).ToList();
+        foreach (var go in stale) customNames.Remove(go);
     }
 
     private string GetNewName(string original, int index)
@@ -427,6 +650,15 @@ public class AnimationRenameWindow : EditorWindow
             default:
                 return original;
         }
+    }
+
+    /// <summary>取一个对象的最终新名称：优先使用用户在预览里手动输入的文本，否则按规则计算。</summary>
+    private string GetEffectiveNewName(GameObject go, int index)
+    {
+        if (go == null) return "";
+        if (customNames.TryGetValue(go, out var cn) && !string.IsNullOrEmpty(cn))
+            return cn;
+        return GetNewName(go.name, index);
     }
 
     private string ApplyReplaceToName(string name)
@@ -492,17 +724,17 @@ public class AnimationRenameWindow : EditorWindow
 
         if (targets.Count == 0)
         {
-            statusMessage = "没有可改名的对象：请先在“② 挂载动画剪辑的对象”里添加场景对象。";
+            statusMessage = "没有可改名的对象：请先在左侧拖入场景对象/预制体。";
             return;
         }
 
-        // 计算要改名的对象及其新名称
+        // 计算要改名的对象及其新名称（优先使用预览里手动输入的文本）
         var nameMap = new Dictionary<GameObject, string>();
         int index = 0;
         foreach (var go in targets)
         {
-            if (go == null) continue;
-            string newName = GetNewName(go.name, index);
+            if (go == null) { index++; continue; }
+            string newName = GetEffectiveNewName(go, index);
             if (newName != go.name)
                 nameMap[go] = newName;
             index++;
@@ -510,23 +742,40 @@ public class AnimationRenameWindow : EditorWindow
 
         if (nameMap.Count == 0)
         {
-            statusMessage = "规则未产生任何名称变化，无需执行。";
+            statusMessage = "规则未产生任何名称变化，且未输入自定义名称，无需执行。";
             return;
         }
 
-        var pathRemap = BuildPathRemap(nameMap);
+        // 关键：改名之前先为每条记录计算“旧路径→新路径”映射（此时对象仍是旧名，才能正确比对绑定路径）。
+        // 之后再改名，否则绑定路径会被算成“老路径==新路径”，导致动画绑定不会被更新。
+        var entryRemaps = new List<EntryRemap>();
+        foreach (var e in entries)
+        {
+            if (e.obj == null) continue;
+            var animRoot = FindAnimationRoot(e.obj);
+            var pathRemap = BuildPathRemapForObject(animRoot, nameMap);
+            entryRemaps.Add(new EntryRemap { clips = e.clips, pathRemap = pathRemap });
+        }
 
-        // 记录场景对象撤销
+        // 记录场景对象撤销（改名）
         Undo.RecordObjects(nameMap.Keys.ToArray(), "批量改名(动画保持)");
 
         // 批量改名
         foreach (var kv in nameMap)
             kv.Key.name = kv.Value;
 
-        // 更新动画剪辑绑定路径
+        // 改名之后，用之前保存的映射改写动画剪辑的绑定路径
         int updatedBindings = 0;
-        foreach (var clip in clips)
-            updatedBindings += UpdateClipPaths(clip, pathRemap);
+        var processed = new HashSet<AnimationClip>();
+        foreach (var er in entryRemaps)
+        {
+            foreach (var ci in er.clips)
+            {
+                if (ci.clip == null) continue;
+                if (!processed.Add(ci.clip)) continue; // 同一剪辑只处理一次
+                updatedBindings += UpdateClipPaths(ci.clip, er.pathRemap);
+            }
+        }
 
         AssetDatabase.Refresh();
         Repaint();
@@ -536,36 +785,34 @@ public class AnimationRenameWindow : EditorWindow
     }
 
     /// <summary>
-    /// 根据各挂载对象，建立“旧相对路径 → 新相对路径”的映射。
-    /// 相对路径是相对挂载对象（绑定路径根）的、以 / 分隔的对象名链，例如 “A/B”。
+    /// 以某条记录的对象为路径根，建立其子层级内“旧相对路径 → 新相对路径”的映射。
+    /// 相对路径是相对该对象（绑定路径根）的、以 / 分隔的对象名链，例如 “A/B”。
     /// </summary>
-    private Dictionary<string, string> BuildPathRemap(Dictionary<GameObject, string> nameMap)
+    private Dictionary<string, string> BuildPathRemapForObject(GameObject root, Dictionary<GameObject, string> nameMap)
     {
         var map = new Dictionary<string, string>();
-        foreach (var m in mounts)
+        if (root == null) return map;
+        var rootT = root.transform;
+
+        foreach (var t in root.GetComponentsInChildren<Transform>(true))
         {
-            if (m == null) continue;
-            var rootT = m.transform;
-            foreach (var t in m.GetComponentsInChildren<Transform>(true))
+            if (t == rootT) continue; // 根对象的路径为空串，不需改名
+
+            var chain = GetChildChain(rootT, t);
+            if (chain == null || chain.Count == 0) continue;
+
+            var oldSegs = new string[chain.Count];
+            var newSegs = new string[chain.Count];
+            for (int i = 0; i < chain.Count; i++)
             {
-                if (t == rootT) continue; // 根对象的路径为空串，不需改名
-
-                var chain = GetChildChain(rootT, t);
-                if (chain == null || chain.Count == 0) continue;
-
-                var oldSegs = new string[chain.Count];
-                var newSegs = new string[chain.Count];
-                for (int i = 0; i < chain.Count; i++)
-                {
-                    oldSegs[i] = chain[i].name;
-                    newSegs[i] = nameMap.TryGetValue(chain[i].gameObject, out var nn) ? nn : chain[i].name;
-                }
-
-                string oldPath = string.Join("/", oldSegs);
-                string newPath = string.Join("/", newSegs);
-                if (oldPath == newPath) continue;
-                map[oldPath] = newPath;
+                oldSegs[i] = chain[i].name;
+                newSegs[i] = nameMap.TryGetValue(chain[i].gameObject, out var nn) ? nn : chain[i].name;
             }
+
+            string oldPath = string.Join("/", oldSegs);
+            string newPath = string.Join("/", newSegs);
+            if (oldPath == newPath) continue;
+            map[oldPath] = newPath;
         }
         return map;
     }
