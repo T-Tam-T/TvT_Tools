@@ -6,7 +6,6 @@ Unity 编辑器工具脚本合集（Editor 扩展），由 `Editor_2026_7_17` �
 - `PrefabExporterWindow/` — Prefab 导出工具
 - `ResourceManager/` — 资源管理器
 - `TXTvisualWindow/` — TXT 可视化阅读窗口
-- `vHierarchy/` — 第三方 Hierarchy 增强插件
 - 根目录 `*.cs` — 各独立编辑器工具
 
 ## 使用方式
