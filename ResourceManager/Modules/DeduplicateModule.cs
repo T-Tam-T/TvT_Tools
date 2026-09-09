@@ -1,4 +1,4 @@
-﻿using UnityEngine;
+using UnityEngine;
 using UnityEditor;
 using ResourceManager.Core;
 using ResourceManager.Utilities;
@@ -21,8 +21,8 @@ namespace ResourceManager.Modules
         private bool skipUnityTextures = true;
 
         private List<TextureGroup> textureGroups = new List<TextureGroup>();
-        // 粒子维度的替换选择：key = "粒子instanceId_贴图路径", value = 目标贴图
-        private Dictionary<string, Texture2D> particleReplacements = new Dictionary<string, Texture2D>();
+        // 引用维度的替换选择：key = "引用唯一标识", value = 目标贴图
+        private Dictionary<string, Texture2D> textureReplacements = new Dictionary<string, Texture2D>();
         private Vector2 scrollPos;
         private bool isProcessing = false;
         private string status = "就绪";
@@ -36,20 +36,49 @@ namespace ResourceManager.Modules
         // ----- 内部类 -----
 
         /// <summary>
-        /// 记录一个粒子系统中某处对贴图的引用位置
+        /// 记录某处对贴图的引用位置（支持粒子系统 与 模型 MeshRenderer/SkinnedMeshRenderer 材质球）
         /// </summary>
         [System.Serializable]
-        public class ParticleTextureRef
+        public class TextureRef
         {
-            public ParticleSystem particleSystem;       // 所属粒子系统
             public GameObject ownerObject;              // 所属根对象（预制体/场景对象）
-            public string refType;                      // 引用类型: "Material"/"TextureSheetSprite"/"TextureSheetTex"
-            public int materialIndex;                   // 材质槽索引（仅 Material 类型）
-            public string propertyName;                 // Shader 属性名（仅 Material 类型）
-            public int spriteIndex;                     // 精灵索引（仅 TextureSheetSprite 类型）
+            public string refType;                      // 引用类型: "ParticleMaterial"/"ParticleSprite"/"ParticleTex"/"MeshMaterial"
+            public ParticleSystem particleSystem;       // 所属粒子系统（仅粒子引用）
+            public Renderer renderer;                   // 所属渲染器（仅 MeshMaterial / 模型引用）
+            public int materialIndex;                   // 材质槽索引（Material 类型）
+            public string propertyName;                 // Shader 属性名（Material 类型）
+            public int spriteIndex;                     // 精灵索引（TextureSheetSprite 类型）
+
+            public bool IsParticleRef => refType != "MeshMaterial";
+            public bool IsMeshRef => refType == "MeshMaterial";
+
+            public string DisplayLabel
+            {
+                get
+                {
+                    switch (refType)
+                    {
+                        case "ParticleMaterial": return $"粒子·材质[{materialIndex}]·{propertyName}";
+                        case "ParticleSprite": return $"粒子·纹理帧[精灵:{spriteIndex}]";
+                        case "ParticleTex": return "粒子·纹理帧[Tex模式]";
+                        case "MeshMaterial": return $"模型·材质[{materialIndex}]·{propertyName}";
+                        default: return refType;
+                    }
+                }
+            }
 
             // 用于生成唯一 key
-            public string UniqueKey => $"{particleSystem.GetInstanceID()}_{refType}_{materialIndex}_{propertyName}_{spriteIndex}";
+            public string UniqueKey => $"{refType}_{ReferenceInstanceId}_{materialIndex}_{propertyName}_{spriteIndex}";
+
+            private int ReferenceInstanceId
+            {
+                get
+                {
+                    if (particleSystem != null) return particleSystem.GetInstanceID();
+                    if (renderer != null) return renderer.GetInstanceID();
+                    return ownerObject != null ? ownerObject.GetInstanceID() : 0;
+                }
+            }
         }
 
         private class TextureGroup
@@ -61,13 +90,13 @@ namespace ResourceManager.Modules
         }
 
         /// <summary>
-        /// 一张重复贴图 + 使用它的粒子列表
+        /// 一张重复贴图 + 使用它的引用列表（粒子 或 模型材质球）
         /// </summary>
         private class DuplicateEntry
         {
             public Texture2D texture;
             public string texturePath;
-            public List<ParticleTextureRef> particleRefs = new List<ParticleTextureRef>();
+            public List<TextureRef> refs = new List<TextureRef>();
         }
 
         // ----- IMultiObjectModule 实现 -----
@@ -79,7 +108,7 @@ namespace ResourceManager.Modules
                 return;
             }
 
-            GUILayout.Label("粒子贴图去重（与源文件夹对比）", EditorStyles.boldLabel);
+            GUILayout.Label("贴图去重（与源文件夹对比）", EditorStyles.boldLabel);
             EditorGUILayout.Space(5);
 
             // ----- 源文件夹选择 -----
@@ -111,9 +140,9 @@ namespace ResourceManager.Modules
 
             // ----- 操作按钮 -----
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("扫描粒子系统中的重复贴图", GUILayout.Height(30)))
+            if (GUILayout.Button("扫描粒子/模型系统中的重复贴图", GUILayout.Height(30)))
             {
-                ScanParticleDuplicates(session);
+                ScanDuplicates(session);
             }
             if (GUILayout.Button("替换选中项", GUILayout.Height(30)) && textureGroups.Count > 0)
             {
@@ -145,8 +174,8 @@ namespace ResourceManager.Modules
             else
             {
                 int totalDups = textureGroups.Sum(g => g.duplicates.Sum(d => d.texture != null ? 1 : 0));
-                int totalRefs = textureGroups.Sum(g => g.duplicates.Sum(d => d.particleRefs.Count));
-                GUILayout.Label($"分组: {textureGroups.Count}  重复贴图: {totalDups}  粒子引用: {totalRefs}");
+                int totalRefs = textureGroups.Sum(g => g.duplicates.Sum(d => d.refs.Count));
+                GUILayout.Label($"分组: {textureGroups.Count}  重复贴图: {totalDups}  引用: {totalRefs}");
             }
             EditorGUILayout.EndHorizontal();
 
@@ -197,7 +226,7 @@ namespace ResourceManager.Modules
         // ----- UI绘制 -----
 
         /// <summary>
-        /// 绘制一个可折叠的重复分组：源贴图 + 每张重复贴图及其使用粒子列表
+        /// 绘制一个可折叠的重复分组：源贴图 + 每张重复贴图及其使用引用列表
         /// </summary>
         private void DrawTextureGroup(TextureGroup group, int groupIndex, AnalysisSession session)
         {
@@ -213,11 +242,19 @@ namespace ResourceManager.Modules
 
             // --- 折叠标题行 ---
             int dupCount = group.duplicates.Count;
-            int refCount = group.duplicates.Sum(d => d.particleRefs.Count);
+            int refCount = group.duplicates.Sum(d => d.refs.Count);
+
+            // 统计粒子/模型引用数
+            int particleRefCount = group.duplicates.Sum(d => d.refs.Count(r => r.IsParticleRef));
+            int meshRefCount = group.duplicates.Sum(d => d.refs.Count(r => r.IsMeshRef));
+            string typeSummary = (particleRefCount > 0 ? $"{particleRefCount}粒子" : "") +
+                                 (particleRefCount > 0 && meshRefCount > 0 ? "/" : "") +
+                                 (meshRefCount > 0 ? $"{meshRefCount}模型" : "");
+
             string sourceName = group.sourceTexture != null ? Path.GetFileName(AssetDatabase.GetAssetPath(group.sourceTexture)) : "未知";
 
             bool newFoldout = EditorGUILayout.Foldout(groupFoldouts[groupIndex],
-                $"重复分组: {sourceName} (哈希: {group.hash.Substring(0, Math.Min(12, group.hash.Length))}...)  [{dupCount}张重复, {refCount}个粒子引用]",
+                $"重复分组: {sourceName} (哈希: {group.hash.Substring(0, Math.Min(12, group.hash.Length))}...)  [{dupCount}张重复, {refCount}个引用]",
                 true);
             groupFoldouts[groupIndex] = newFoldout;
 
@@ -236,7 +273,7 @@ namespace ResourceManager.Modules
 
                 EditorGUILayout.Space(4);
 
-                // === 重复贴图区域（每张 + 使用它的粒子列表）===
+                // === 重复贴图区域（每张 + 使用它的引用列表）===
                 int di = 0;
                 foreach (var dupEntry in group.duplicates)
                 {
@@ -255,7 +292,14 @@ namespace ResourceManager.Modules
                     EditorGUILayout.LabelField(Path.GetFileName(dupPath), EditorStyles.boldLabel);
                     EditorGUILayout.LabelField($"尺寸: {dupEntry.texture.width}x{dupEntry.texture.height}", EditorStyles.miniLabel);
                     EditorGUILayout.LabelField($"格式: {dupEntry.texture.format}", EditorStyles.miniLabel);
-                    EditorGUILayout.LabelField($"被 {dupEntry.particleRefs.Count} 个粒子引用", EditorStyles.miniLabel);
+                    // 引用统计（粒子 + 模型）
+                    int pCnt = dupEntry.refs.Count(r => r.IsParticleRef);
+                    int mCnt = dupEntry.refs.Count(r => r.IsMeshRef);
+                    string refSummary = (pCnt > 0 ? $"{pCnt}粒子" : "") +
+                                        (pCnt > 0 && mCnt > 0 ? "/" : "") +
+                                        (mCnt > 0 ? $"{mCnt}模型" : "") +
+                                        (dupEntry.refs.Count == 0 ? "0引用" : "");
+                    EditorGUILayout.LabelField($"被 {refSummary} 引用", EditorStyles.miniLabel);
                     EditorGUILayout.EndVertical();
                     EditorGUILayout.EndHorizontal();
 
@@ -265,40 +309,58 @@ namespace ResourceManager.Modules
                     if (GUILayout.Button("全部替换为源贴图", GUILayout.Width(130)))
                     {
                         // 立即执行替换（不依赖二次点击"替换选中项"）
-                        var refs = new List<ParticleTextureRef>(dupEntry.particleRefs);
+                        var refs = new List<TextureRef>(dupEntry.refs);
                         ReplaceDuplicateImmediate(refs, group.sourceTexture);
                         status = $"已将 {refs.Count} 个引用替换为源贴图";
                         // 在下一帧重新扫描以更新 UI 结果
                         EditorApplication.delayCall += () =>
                         {
-                            ScanParticleDuplicates(session);
+                            ScanDuplicates(session);
                         };
                     }
 
-                    // 全局 ObjectField 替换目标选择（该贴图的所有粒子统一用这个）
+                    // 全局 ObjectField 替换目标选择（该贴图的所有引用统一用这个）
                     Texture2D globalReplacement = GetGlobalReplacementForDuplicate(dupEntry.texturePath);
                     Texture2D newGlobalTex = EditorGUILayout.ObjectField(globalReplacement, typeof(Texture2D), false,
                         GUILayout.Width(100)) as Texture2D;
                     if (newGlobalTex != globalReplacement)
                     {
-                        SetGlobalReplacementForDuplicate(dupEntry.texturePath, newGlobalTex, dupEntry.particleRefs);
+                        SetGlobalReplacementForDuplicate(dupEntry.texturePath, newGlobalTex, dupEntry.refs);
                     }
                     EditorGUILayout.EndHorizontal();
 
                     EditorGUILayout.Space(4);
 
-                    // === 粒子系统列表（每个粒子单独控制）===
-                    if (dupEntry.particleRefs.Count > 0)
+                    // === 引用列表（粒子系统 + 模型材质球，每个单独控制）===
+                    if (dupEntry.refs.Count > 0)
                     {
-                        EditorGUILayout.LabelField("使用此贴图的粒子系统:", EditorStyles.centeredGreyMiniLabel);
-                        foreach (var pRef in dupEntry.particleRefs)
+                        EditorGUILayout.LabelField("使用此贴图的引用:", EditorStyles.centeredGreyMiniLabel);
+
+                        // 分开显示粒子引用 与 模型引用，便于阅读
+                        var particleRefs = dupEntry.refs.Where(r => r.IsParticleRef).ToList();
+                        var meshRefs = dupEntry.refs.Where(r => r.IsMeshRef).ToList();
+
+                        if (particleRefs.Count > 0)
                         {
-                            DrawParticleRefItem(pRef, group.sourceTexture, dupEntry.texture);
+                            EditorGUILayout.LabelField($"— 粒子系统 ({particleRefs.Count}) —", EditorStyles.miniBoldLabel);
+                            foreach (var pRef in particleRefs)
+                            {
+                                DrawTextureRefItem(pRef, group.sourceTexture, dupEntry.texture);
+                            }
+                        }
+
+                        if (meshRefs.Count > 0)
+                        {
+                            EditorGUILayout.LabelField($"— 模型材质球 ({meshRefs.Count}) —", EditorStyles.miniBoldLabel);
+                            foreach (var mRef in meshRefs)
+                            {
+                                DrawTextureRefItem(mRef, group.sourceTexture, dupEntry.texture);
+                            }
                         }
                     }
                     else
                     {
-                        EditorGUILayout.HelpBox("未追踪到具体粒子引用信息", MessageType.Warning);
+                        EditorGUILayout.HelpBox("未追踪到具体引用信息", MessageType.Warning);
                     }
 
                     EditorGUILayout.EndVertical();
@@ -336,8 +398,13 @@ namespace ResourceManager.Modules
                 EditorGUILayout.ObjectField(dup.texture, typeof(Texture2D), false,
                     GUILayout.Width(32), GUILayout.Height(32));
 
-                // 显示涉及的粒子数量
-                EditorGUILayout.LabelField($"({dup.particleRefs.Count}粒子)", EditorStyles.miniLabel, GUILayout.Width(60));
+                // 显示涉及的引用数量（粒子 + 模型）
+                int pCnt = dup.refs.Count(r => r.IsParticleRef);
+                int mCnt = dup.refs.Count(r => r.IsMeshRef);
+                string summary = (pCnt > 0 ? $"{pCnt}粒子" : "") +
+                                 (pCnt > 0 && mCnt > 0 ? "/" : "") +
+                                 (mCnt > 0 ? $"{mCnt}模型" : "");
+                EditorGUILayout.LabelField($"({summary})", EditorStyles.miniLabel, GUILayout.Width(80));
             }
 
             GUILayout.FlexibleSpace();
@@ -359,27 +426,28 @@ namespace ResourceManager.Modules
         }
 
         /// <summary>
-        /// 绘制单个粒子引用条目：粒子名称 + 引用详情 + 单独的替换控件
+        /// 绘制单个引用条目：粒子系统/模型材质球 + 引用详情 + 单独的替换控件
         /// </summary>
-        private void DrawParticleRefItem(ParticleTextureRef pRef, Texture2D sourceTex, Texture2D dupTex)
+        private void DrawTextureRefItem(TextureRef pRef, Texture2D sourceTex, Texture2D dupTex)
         {
-            if (pRef.particleSystem == null) return;
+            if (pRef == null) return;
+            if (pRef.IsParticleRef && pRef.particleSystem == null) return;
+            if (pRef.IsMeshRef && pRef.renderer == null) return;
 
             EditorGUILayout.BeginHorizontal(GUI.skin.box);
 
-            // 粒子系统 ObjectField
-            EditorGUILayout.ObjectField(pRef.particleSystem, typeof(ParticleSystem), false, GUILayout.Width(160));
+            // 引用对象字段（粒子系统 或 模型渲染器）
+            if (pRef.IsParticleRef)
+            {
+                EditorGUILayout.ObjectField(pRef.particleSystem, typeof(ParticleSystem), false, GUILayout.Width(160));
+            }
+            else
+            {
+                EditorGUILayout.ObjectField(pRef.renderer, typeof(Renderer), false, GUILayout.Width(160));
+            }
 
             // 引用类型标签
-            string typeLabel = "";
-            switch (pRef.refType)
-            {
-                case "Material": typeLabel = $"材质[{pRef.materialIndex}]·{pRef.propertyName}"; break;
-                case "TextureSheetSprite": typeLabel = $"纹理帧[精灵:{pRef.spriteIndex}]"; break;
-                case "TextureSheetTex": typeLabel = "纹理帧[Tex模式]"; break;
-                default: typeLabel = pRef.refType; break;
-            }
-            EditorGUILayout.LabelField(typeLabel, EditorStyles.miniLabel, GUILayout.Width(120));
+            EditorGUILayout.LabelField(pRef.DisplayLabel, EditorStyles.miniLabel, GUILayout.Width(150));
 
             // 所属对象名
             string ownerName = pRef.ownerObject != null ? pRef.ownerObject.name : "?";
@@ -389,28 +457,28 @@ namespace ResourceManager.Modules
 
             // 当前选择的替换目标
             string key = pRef.UniqueKey;
-            if (!particleReplacements.ContainsKey(key))
-                particleReplacements[key] = null; // null 表示未设置替换
+            if (!textureReplacements.ContainsKey(key))
+                textureReplacements[key] = null; // null 表示未设置替换
 
-            Texture2D currentReplacement = particleReplacements[key];
+            Texture2D currentReplacement = textureReplacements[key];
 
             // 替换目标选择
             Texture2D selected = EditorGUILayout.ObjectField(currentReplacement, typeof(Texture2D), false,
                 GUILayout.Width(100)) as Texture2D;
             if (selected != currentReplacement)
-                particleReplacements[key] = selected;
+                textureReplacements[key] = selected;
 
             // 快捷按钮：设为源贴图 / 清除
             if (GUILayout.Button("源贴图", GUILayout.Width(45)))
-                particleReplacements[key] = sourceTex;
+                textureReplacements[key] = sourceTex;
             if (GUILayout.Button("清除", GUILayout.Width(35)))
-                particleReplacements[key] = null;
+                textureReplacements[key] = null;
 
             EditorGUILayout.EndHorizontal();
         }
 
-        // ----- 核心扫描逻辑（仅粒子贴图） -----
-        private void ScanParticleDuplicates(AnalysisSession session)
+        // ----- 核心扫描逻辑（粒子贴图 + 模型材质贴图） -----
+        private void ScanDuplicates(AnalysisSession session)
         {
             if (!AssetDatabase.IsValidFolder(sourceFolder))
             {
@@ -422,7 +490,7 @@ namespace ResourceManager.Modules
             status = "扫描中...";
             progress = 0;
             textureGroups.Clear();
-            particleReplacements.Clear();
+            textureReplacements.Clear();
             groupFoldouts.Clear();
 
             try
@@ -436,11 +504,11 @@ namespace ResourceManager.Modules
                     return;
                 }
 
-                // 2. 从当前分析会话中收集所有粒子系统使用的贴图（含粒子归属信息）
-                var particleTextureMap = CollectParticleTexturesWithRefs(session);
-                if (particleTextureMap.Count == 0)
+                // 2. 从当前分析会话中收集所有粒子系统 + 模型材质球使用的贴图（含引用归属信息）
+                var textureMap = CollectTexturesWithRefs(session);
+                if (textureMap.Count == 0)
                 {
-                    status = "当前分析对象中没有粒子系统或粒子未使用贴图。";
+                    status = "当前分析对象中没有粒子系统或模型，且它们未使用贴图。";
                     isProcessing = false;
                     return;
                 }
@@ -455,7 +523,7 @@ namespace ResourceManager.Modules
                 {
                     if (!isProcessing) return;
                     processed++;
-                    progress = (float)processed / (total + particleTextureMap.Count) * 0.5f;
+                    progress = (float)processed / (total + textureMap.Count) * 0.5f;
                     string hash = ComputeHash(tex);
                     if (!string.IsNullOrEmpty(hash) && !sourceHashes.ContainsKey(hash))
                     {
@@ -464,13 +532,13 @@ namespace ResourceManager.Modules
                     }
                 }
 
-                // 4. 计算粒子贴图哈希，并与源对比
-                //    key=hash, value=(贴图, 粒子引用列表)
-                var targetHashes = new Dictionary<string, List<KeyValuePair<Texture2D, List<ParticleTextureRef>>>>();
+                // 4. 计算目标贴图哈希，并与源对比
+                //    key=hash, value=(贴图, 引用列表)
+                var targetHashes = new Dictionary<string, List<KeyValuePair<Texture2D, List<TextureRef>>>>();
 
-                total = particleTextureMap.Count;
+                total = textureMap.Count;
                 processed = 0;
-                foreach (var kvp in particleTextureMap)
+                foreach (var kvp in textureMap)
                 {
                     if (!isProcessing) return;
                     processed++;
@@ -479,7 +547,7 @@ namespace ResourceManager.Modules
                     if (!string.IsNullOrEmpty(hash))
                     {
                         if (!targetHashes.ContainsKey(hash))
-                            targetHashes[hash] = new List<KeyValuePair<Texture2D, List<ParticleTextureRef>>>();
+                            targetHashes[hash] = new List<KeyValuePair<Texture2D, List<TextureRef>>>();
                         targetHashes[hash].Add(kvp);
                     }
                 }
@@ -515,7 +583,7 @@ namespace ResourceManager.Modules
                         {
                             texture = dupTex,
                             texturePath = dupPath,
-                            particleRefs = texAndRefs.Value
+                            refs = texAndRefs.Value
                         });
                     }
 
@@ -538,99 +606,77 @@ namespace ResourceManager.Modules
         }
 
         /// <summary>
-        /// 收集所有粒子系统使用的贴图，并记录每个贴图被哪些粒子系统、以什么方式引用
-        /// 返回: Texture2D → List&lt;ParticleTextureRef&gt;
+        /// 收集所有粒子系统 与 模型材质球使用的贴图，并记录每个贴图被哪些对象、以什么方式引用
+        /// 返回: Texture2D → List&lt;TextureRef&gt;
         /// </summary>
-        private Dictionary<Texture2D, List<ParticleTextureRef>> CollectParticleTexturesWithRefs(AnalysisSession session)
+        private Dictionary<Texture2D, List<TextureRef>> CollectTexturesWithRefs(AnalysisSession session)
         {
-            var result = new Dictionary<Texture2D, List<ParticleTextureRef>>();
+            var result = new Dictionary<Texture2D, List<TextureRef>>();
 
             foreach (var kvp in session.Analyzers)
             {
                 var go = kvp.Key;
                 if (go == null) continue;
 
+                // ----- 粒子系统 -----
                 var particleSystems = go.GetComponentsInChildren<ParticleSystem>(true);
                 foreach (var ps in particleSystems)
                 {
                     if (ps == null) continue;
+                    CollectParticleRefs(go, ps, result);
+                }
 
-                    // 1. 渲染器材质中的贴图
-                    var renderer = ps.GetComponent<ParticleSystemRenderer>();
-                    if (renderer != null && renderer.sharedMaterials != null)
+                // ----- 模型（MeshRenderer / SkinnedMeshRenderer 材质球） -----
+                var renderers = go.GetComponentsInChildren<Renderer>(true);
+                foreach (var renderer in renderers)
+                {
+                    if (renderer == null) continue;
+                    // 粒子渲染器已在粒子部分单独处理，跳过避免重复
+                    if (renderer is ParticleSystemRenderer) continue;
+                    // 只处理模型渲染器
+                    if (!(renderer is MeshRenderer) && !(renderer is SkinnedMeshRenderer)) continue;
+                    CollectRendererRefs(go, renderer, result);
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// 收集单个粒子系统使用的贴图引用（渲染器材质 + TextureSheetAnimation）
+        /// </summary>
+        private void CollectParticleRefs(GameObject go, ParticleSystem ps,
+            Dictionary<Texture2D, List<TextureRef>> result)
+        {
+            if (ps == null) return;
+
+            // 1. 渲染器材质中的贴图
+            var renderer = ps.GetComponent<ParticleSystemRenderer>();
+            if (renderer != null && renderer.sharedMaterials != null)
+            {
+                for (int matIdx = 0; matIdx < renderer.sharedMaterials.Length; matIdx++)
+                {
+                    var mat = renderer.sharedMaterials[matIdx];
+                    if (mat == null || mat.shader == null) continue;
+
+                    int propCount = ShaderUtil.GetPropertyCount(mat.shader);
+                    for (int p = 0; p < propCount; p++)
                     {
-                        for (int matIdx = 0; matIdx < renderer.sharedMaterials.Length; matIdx++)
+                        if (ShaderUtil.GetPropertyType(mat.shader, p) == ShaderUtil.ShaderPropertyType.TexEnv)
                         {
-                            var mat = renderer.sharedMaterials[matIdx];
-                            if (mat == null || mat.shader == null) continue;
-
-                            int propCount = ShaderUtil.GetPropertyCount(mat.shader);
-                            for (int p = 0; p < propCount; p++)
-                            {
-                                if (ShaderUtil.GetPropertyType(mat.shader, p) == ShaderUtil.ShaderPropertyType.TexEnv)
-                                {
-                                    string propName = ShaderUtil.GetPropertyName(mat.shader, p);
-                                    var tex = mat.GetTexture(propName) as Texture2D;
-                                    if (tex != null)
-                                    {
-                                        if (!result.ContainsKey(tex))
-                                            result[tex] = new List<ParticleTextureRef>();
-                                        result[tex].Add(new ParticleTextureRef
-                                        {
-                                            particleSystem = ps,
-                                            ownerObject = go,
-                                            refType = "Material",
-                                            materialIndex = matIdx,
-                                            propertyName = propName
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // 2. TextureSheetAnimation 模块
-                    var texSheet = ps.textureSheetAnimation;
-                    if (texSheet.enabled)
-                    {
-                        if (texSheet.mode == ParticleSystemAnimationMode.Sprites)
-                        {
-                            var so = new SerializedObject(ps);
-                            var sheetProp = so.FindProperty("m_TextureSheetAnimation");
-                            var spritesProp = sheetProp.FindPropertyRelative("m_Sprites");
-                            for (int i = 0; i < spritesProp.arraySize; i++)
-                            {
-                                var sprite = spritesProp.GetArrayElementAtIndex(i).objectReferenceValue as Sprite;
-                                if (sprite != null && sprite.texture != null)
-                                {
-                                    Texture2D tex = sprite.texture;
-                                    if (!result.ContainsKey(tex))
-                                        result[tex] = new List<ParticleTextureRef>();
-                                    result[tex].Add(new ParticleTextureRef
-                                    {
-                                        particleSystem = ps,
-                                        ownerObject = go,
-                                        refType = "TextureSheetSprite",
-                                        spriteIndex = i
-                                    });
-                                }
-                            }
-                        }
-                        else // Texture 模式
-                        {
-                            var so = new SerializedObject(ps);
-                            var sheetProp = so.FindProperty("m_TextureSheetAnimation");
-                            var texProp = sheetProp?.FindPropertyRelative("m_Texture");
-                            var tex = texProp?.objectReferenceValue as Texture2D;
+                            string propName = ShaderUtil.GetPropertyName(mat.shader, p);
+                            var tex = mat.GetTexture(propName) as Texture2D;
                             if (tex != null)
                             {
                                 if (!result.ContainsKey(tex))
-                                    result[tex] = new List<ParticleTextureRef>();
-                                result[tex].Add(new ParticleTextureRef
+                                    result[tex] = new List<TextureRef>();
+                                result[tex].Add(new TextureRef
                                 {
                                     particleSystem = ps,
                                     ownerObject = go,
-                                    refType = "TextureSheetTex"
+                                    refType = "ParticleMaterial",
+                                    materialIndex = matIdx,
+                                    propertyName = propName
                                 });
                             }
                         }
@@ -638,7 +684,90 @@ namespace ResourceManager.Modules
                 }
             }
 
-            return result;
+            // 2. TextureSheetAnimation 模块
+            var texSheet = ps.textureSheetAnimation;
+            if (texSheet.enabled)
+            {
+                if (texSheet.mode == ParticleSystemAnimationMode.Sprites)
+                {
+                    var so = new SerializedObject(ps);
+                    var sheetProp = so.FindProperty("m_TextureSheetAnimation");
+                    var spritesProp = sheetProp.FindPropertyRelative("m_Sprites");
+                    for (int i = 0; i < spritesProp.arraySize; i++)
+                    {
+                        var sprite = spritesProp.GetArrayElementAtIndex(i).objectReferenceValue as Sprite;
+                        if (sprite != null && sprite.texture != null)
+                        {
+                            Texture2D tex = sprite.texture;
+                            if (!result.ContainsKey(tex))
+                                result[tex] = new List<TextureRef>();
+                            result[tex].Add(new TextureRef
+                            {
+                                particleSystem = ps,
+                                ownerObject = go,
+                                refType = "ParticleSprite",
+                                spriteIndex = i
+                            });
+                        }
+                    }
+                }
+                else // Texture 模式
+                {
+                    var so = new SerializedObject(ps);
+                    var sheetProp = so.FindProperty("m_TextureSheetAnimation");
+                    var texProp = sheetProp?.FindPropertyRelative("m_Texture");
+                    var tex = texProp?.objectReferenceValue as Texture2D;
+                    if (tex != null)
+                    {
+                        if (!result.ContainsKey(tex))
+                            result[tex] = new List<TextureRef>();
+                        result[tex].Add(new TextureRef
+                        {
+                            particleSystem = ps,
+                            ownerObject = go,
+                            refType = "ParticleTex"
+                        });
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// 收集单个模型渲染器（MeshRenderer / SkinnedMeshRenderer）材质球中的贴图引用
+        /// </summary>
+        private void CollectRendererRefs(GameObject go, Renderer renderer,
+            Dictionary<Texture2D, List<TextureRef>> result)
+        {
+            if (renderer == null || renderer.sharedMaterials == null) return;
+
+            for (int matIdx = 0; matIdx < renderer.sharedMaterials.Length; matIdx++)
+            {
+                var mat = renderer.sharedMaterials[matIdx];
+                if (mat == null || mat.shader == null) continue;
+
+                int propCount = ShaderUtil.GetPropertyCount(mat.shader);
+                for (int p = 0; p < propCount; p++)
+                {
+                    if (ShaderUtil.GetPropertyType(mat.shader, p) == ShaderUtil.ShaderPropertyType.TexEnv)
+                    {
+                        string propName = ShaderUtil.GetPropertyName(mat.shader, p);
+                        var tex = mat.GetTexture(propName) as Texture2D;
+                        if (tex != null)
+                        {
+                            if (!result.ContainsKey(tex))
+                                result[tex] = new List<TextureRef>();
+                            result[tex].Add(new TextureRef
+                            {
+                                renderer = renderer,
+                                ownerObject = go,
+                                refType = "MeshMaterial",
+                                materialIndex = matIdx,
+                                propertyName = propName
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         // ----- 通用工具方法 -----
@@ -700,52 +829,56 @@ namespace ResourceManager.Modules
                    path.Contains("Built-in");
         }
 
-        // ----- 全局替换辅助方法（针对某张贴图的所有粒子统一操作）-----
+        // ----- 全局替换辅助方法（针对某张贴图的所有引用统一操作）-----
 
         private Texture2D GetGlobalReplacementForDuplicate(string texturePath)
         {
-            // 找到该贴图下任意一个已设置的替换值作为全局代表
-            foreach (var kvp in particleReplacements)
+            // 从当前分组中寻找该贴图，返回任一已设置的替换值作为全局代表
+            foreach (var group in textureGroups)
             {
-                if (kvp.Value != null)
+                foreach (var dup in group.duplicates)
                 {
-                    // 通过反向查找确认是否属于这张贴图
-                    // 简化方案：返回第一个非null值作为代表
-                    // 实际上我们需要更精确的查找
+                    if (string.Equals(dup.texturePath, texturePath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        foreach (var r in dup.refs)
+                        {
+                            if (textureReplacements.TryGetValue(r.UniqueKey, out var t) && t != null)
+                                return t;
+                        }
+                    }
                 }
             }
             return null; // 未设置全局值时返回 null
         }
 
-        private void SetGlobalReplacementForDuplicate(string texturePath, Texture2D newTex, List<ParticleTextureRef> refs)
+        private void SetGlobalReplacementForDuplicate(string texturePath, Texture2D newTex, List<TextureRef> refs)
         {
             foreach (var pRef in refs)
-                particleReplacements[pRef.UniqueKey] = newTex;
+                textureReplacements[pRef.UniqueKey] = newTex;
         }
 
         // ----- 立即替换单个重复条目（由「全部替换为源贴图」按钮触发）-----
         /// <summary>
-        /// 立即将该重复贴图的所有粒子引用替换为源贴图，并录制 Undo。
-        /// 不依赖 particleReplacements 字典，直接修改材质和粒子系统。
+        /// 立即将该重复贴图的所有引用（粒子 + 模型材质球）替换为源贴图，并录制 Undo。
+        /// 不依赖 textureReplacements 字典，直接修改材质和粒子系统。
         /// </summary>
-        private void ReplaceDuplicateImmediate(List<ParticleTextureRef> refs, Texture2D sourceTexture)
+        private void ReplaceDuplicateImmediate(List<TextureRef> refs, Texture2D sourceTexture)
         {
             if (refs.Count == 0 || sourceTexture == null) return;
 
             // 录制 Undo：所有受影响的对象
             var affectedGOs = refs
-                .Where(r => r.ownerObject != null && r.particleSystem != null)
+                .Where(r => r.ownerObject != null)
                 .Select(r => r.ownerObject)
                 .Distinct()
                 .ToList();
 
             foreach (var go in affectedGOs)
-                Undo.RecordObject(go, "Particle Texture Deduplication");
+                Undo.RecordObject(go, "Texture Deduplication");
 
-            // 按粒子系统分组，批量处理
-            var byPs = refs
-                .Where(r => r.particleSystem != null)
-                .GroupBy(r => r.particleSystem);
+            // ----- 处理粒子引用 -----
+            var particleRefs = refs.Where(r => r.IsParticleRef && r.particleSystem != null).ToList();
+            var byPs = particleRefs.GroupBy(r => r.particleSystem);
 
             foreach (var psGroup in byPs)
             {
@@ -755,54 +888,72 @@ namespace ResourceManager.Modules
                 // 录制粒子系统渲染器的 Undo
                 var renderer = ps.GetComponent<ParticleSystemRenderer>();
                 if (renderer != null)
-                    Undo.RecordObject(renderer, "Particle Texture Deduplication");
+                    Undo.RecordObject(renderer, "Texture Deduplication");
 
                 // 构建各类替换列表
                 var matRefs = psGroup
-                    .Where(r => r.refType == "Material")
-                    .Select(r => new KeyValuePair<ParticleTextureRef, Texture2D>(r, sourceTexture))
+                    .Where(r => r.refType == "ParticleMaterial")
+                    .Select(r => new KeyValuePair<TextureRef, Texture2D>(r, sourceTexture))
                     .ToList();
 
                 var spriteRefs = psGroup
-                    .Where(r => r.refType == "TextureSheetSprite")
-                    .Select(r => new KeyValuePair<ParticleTextureRef, Texture2D>(r, sourceTexture))
+                    .Where(r => r.refType == "ParticleSprite")
+                    .Select(r => new KeyValuePair<TextureRef, Texture2D>(r, sourceTexture))
                     .ToList();
 
                 var texRefs = psGroup
-                    .Where(r => r.refType == "TextureSheetTex")
-                    .Select(r => new KeyValuePair<ParticleTextureRef, Texture2D>(r, sourceTexture))
+                    .Where(r => r.refType == "ParticleTex")
+                    .Select(r => new KeyValuePair<TextureRef, Texture2D>(r, sourceTexture))
                     .ToList();
 
-                ProcessMaterialReplacements(ps, matRefs);
+                ProcessMaterialReplacements(renderer, matRefs);
                 ProcessTextureSheetReplacements(ps, spriteRefs, texRefs);
+            }
+
+            // ----- 处理模型材质球引用 -----
+            var meshRefs = refs.Where(r => r.IsMeshRef && r.renderer != null).ToList();
+            var byRenderer = meshRefs.GroupBy(r => r.renderer);
+
+            foreach (var rendererGroup in byRenderer)
+            {
+                var renderer = rendererGroup.Key;
+                if (renderer == null) continue;
+
+                Undo.RecordObject(renderer, "Texture Deduplication");
+
+                var matRefs = rendererGroup
+                    .Select(r => new KeyValuePair<TextureRef, Texture2D>(r, sourceTexture))
+                    .ToList();
+
+                ProcessMaterialReplacements(renderer, matRefs);
             }
 
             AssetDatabase.SaveAssets();
         }
 
-        // ----- 替换逻辑（按粒子系统维度执行） -----
+        // ----- 替换逻辑 -----
         private void ReplaceSelected(AnalysisSession session)
         {
             // 过滤出有效替换（非 null 的项）
-            var validReplacements = new List<KeyValuePair<ParticleTextureRef, Texture2D>>();
-            foreach (var kvp in particleReplacements)
+            var validReplacements = new List<KeyValuePair<TextureRef, Texture2D>>();
+            foreach (var kvp in textureReplacements)
             {
                 if (kvp.Value == null) continue;
 
-                // 反查 ParticleTextureRef
-                var pRef = FindParticleRefByKey(session, kvp.Key);
+                // 反查 TextureRef
+                var pRef = FindRefByKey(session, kvp.Key);
                 if (pRef != null)
-                    validReplacements.Add(new KeyValuePair<ParticleTextureRef, Texture2D>(pRef, kvp.Value));
+                    validReplacements.Add(new KeyValuePair<TextureRef, Texture2D>(pRef, kvp.Value));
             }
 
             if (validReplacements.Count == 0)
             {
-                EditorUtility.DisplayDialog("提示", "没有选择需要替换的项目。请为粒子勾选替换目标贴图后再执行。", "确定");
+                EditorUtility.DisplayDialog("提示", "没有选择需要替换的项目。请为引用勾选替换目标贴图后再执行。", "确定");
                 return;
             }
 
             if (!EditorUtility.DisplayDialog("确认替换",
-                $"将对 {validReplacements.Count} 个粒子引用执行贴图替换。\n注意：会修改材质和粒子系统的贴图引用。\n\n确定继续？", "确定", "取消"))
+                $"将对 {validReplacements.Count} 个引用执行贴图替换。\n注意：会修改材质和粒子系统的贴图引用。\n\n确定继续？", "确定", "取消"))
                 return;
 
             isProcessing = true;
@@ -814,37 +965,58 @@ namespace ResourceManager.Modules
                 int total = validReplacements.Count;
                 int idx = 0;
 
-                // 按 (粒子系统, 贴图) 分组，减少 SerializedObject 创建次数
-                var byParticleSystem = validReplacements.GroupBy(r => r.Key.particleSystem.GetInstanceID());
+                // ----- 粒子引用 -----
+                var particleRepls = validReplacements.Where(r => r.Key.IsParticleRef).ToList();
+                var byParticleSystem = particleRepls.GroupBy(r => r.Key.particleSystem);
 
                 foreach (var psGroup in byParticleSystem)
                 {
                     if (!isProcessing) break;
 
-                    var ps = FindParticleSystemById(session, psGroup.Key);
+                    var ps = psGroup.Key;
                     if (ps == null) continue;
 
+                    var renderer = ps.GetComponent<ParticleSystemRenderer>();
+                    if (renderer == null) continue;
+
                     // 处理材质类引用
-                    var matReplacements = psGroup.Where(r => r.Key.refType == "Material").ToList();
-                    ProcessMaterialReplacements(ps, matReplacements);
+                    var matReplacements = psGroup.Where(r => r.Key.refType == "ParticleMaterial").ToList();
+                    ProcessMaterialReplacements(renderer, matReplacements);
 
                     // 处理 TextureSheetAnimation 类引用
-                    var sheetSpriteReplacements = psGroup.Where(r => r.Key.refType == "TextureSheetSprite").ToList();
-                    var sheetTexReplacements = psGroup.Where(r => r.Key.refType == "TextureSheetTex").ToList();
+                    var sheetSpriteReplacements = psGroup.Where(r => r.Key.refType == "ParticleSprite").ToList();
+                    var sheetTexReplacements = psGroup.Where(r => r.Key.refType == "ParticleTex").ToList();
                     ProcessTextureSheetReplacements(ps, sheetSpriteReplacements, sheetTexReplacements);
 
                     idx++;
-                    progress = (float)idx / byParticleSystem.Count();
+                    progress = (float)idx / total;
+                }
+
+                // ----- 模型材质球引用 -----
+                var meshRepls = validReplacements.Where(r => r.Key.IsMeshRef).ToList();
+                var byRenderer = meshRepls.GroupBy(r => r.Key.renderer);
+
+                foreach (var rendererGroup in byRenderer)
+                {
+                    if (!isProcessing) break;
+
+                    var renderer = rendererGroup.Key;
+                    if (renderer == null) continue;
+
+                    ProcessMaterialReplacements(renderer, rendererGroup.ToList());
+
+                    idx++;
+                    progress = (float)idx / total;
                 }
 
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
 
-                status = $"替换完成！共处理 {validReplacements.Count} 个粒子引用。";
-                EditorUtility.DisplayDialog("完成", $"粒子贴图替换完成，共 {validReplacements.Count} 处引用已更新。", "确定");
+                status = $"替换完成！共处理 {validReplacements.Count} 个引用。";
+                EditorUtility.DisplayDialog("完成", $"贴图替换完成，共 {validReplacements.Count} 处引用已更新。", "确定");
 
                 // 重新扫描以更新结果
-                ScanParticleDuplicates(session);
+                ScanDuplicates(session);
             }
             catch (Exception e)
             {
@@ -858,14 +1030,11 @@ namespace ResourceManager.Modules
         }
 
         /// <summary>
-        /// 处理材质中的贴图替换
+        /// 处理渲染器（粒子渲染器 / MeshRenderer / SkinnedMeshRenderer）材质中的贴图替换
         /// </summary>
-        private void ProcessMaterialReplacements(ParticleSystem ps, List<KeyValuePair<ParticleTextureRef, Texture2D>> replacements)
+        private void ProcessMaterialReplacements(Renderer renderer, List<KeyValuePair<TextureRef, Texture2D>> replacements)
         {
-            if (replacements.Count == 0 || ps == null) return;
-
-            var renderer = ps.GetComponent<ParticleSystemRenderer>();
-            if (renderer == null) return;
+            if (replacements.Count == 0 || renderer == null) return;
 
             var mats = renderer.sharedMaterials;
             bool anyChanged = false;
@@ -930,11 +1099,11 @@ namespace ResourceManager.Modules
         }
 
         /// <summary>
-        /// 处理 TextureSheetAnimation 中的贴图替换
+        /// 处理 TextureSheetAnimation 中的贴图替换（仅粒子系统）
         /// </summary>
         private void ProcessTextureSheetReplacements(ParticleSystem ps,
-            List<KeyValuePair<ParticleTextureRef, Texture2D>> spriteReplacements,
-            List<KeyValuePair<ParticleTextureRef, Texture2D>> texReplacements)
+            List<KeyValuePair<TextureRef, Texture2D>> spriteReplacements,
+            List<KeyValuePair<TextureRef, Texture2D>> texReplacements)
         {
             if ((spriteReplacements.Count == 0 && texReplacements.Count == 0) || ps == null) return;
 
@@ -991,16 +1160,16 @@ namespace ResourceManager.Modules
         }
 
         /// <summary>
-        /// 通过 UniqueKey 反查 ParticleTextureRef
+        /// 通过 UniqueKey 反查 TextureRef
         /// </summary>
-        private ParticleTextureRef FindParticleRefByKey(AnalysisSession session, string uniqueKey)
+        private TextureRef FindRefByKey(AnalysisSession session, string uniqueKey)
         {
             // 在所有分组的所有 duplicate entry 中搜索
             foreach (var group in textureGroups)
             {
                 foreach (var dup in group.duplicates)
                 {
-                    foreach (var pRef in dup.particleRefs)
+                    foreach (var pRef in dup.refs)
                     {
                         if (pRef.UniqueKey == uniqueKey)
                             return pRef;
@@ -1010,46 +1179,29 @@ namespace ResourceManager.Modules
             return null;
         }
 
-        /// <summary>
-        /// 通过 instanceId 查找粒子系统
-        /// </summary>
-        private ParticleSystem FindParticleSystemById(AnalysisSession session, int instanceId)
-        {
-            foreach (var kvp in session.Analyzers)
-            {
-                var go = kvp.Key;
-                if (go == null) continue;
-                var ps = go.GetComponentsInChildren<ParticleSystem>(true);
-                var found = System.Array.Find(ps, p => p != null && p.GetInstanceID() == instanceId);
-                if (found != null) return found;
-            }
-            return null;
-        }
-
         private void ClearResults()
         {
             textureGroups.Clear();
-            particleReplacements.Clear();
+            textureReplacements.Clear();
             groupFoldouts.Clear();
             status = "结果已清除";
         }
 
         // ----- 紧急修复：将已替换但未保存的内存材质写入磁盘 -----
         /// <summary>
-        /// 扫描当前会话中所有粒子系统渲染器的材质引用，将无 asset 路径的内存材质保存到磁盘。
+        /// 扫描当前会话中所有渲染器（粒子 + 模型）的材质引用，将无 asset 路径的内存材质保存到磁盘。
         /// 用于修复旧版本替换逻辑遗留的"替换后无法保存到 Project"问题。
         /// </summary>
         private void FixUnsavedMaterials(AnalysisSession session)
         {
             var unsavedMats = new HashSet<Material>();
-            var matToRenderer = new Dictionary<Material, List<(ParticleSystemRenderer renderer, int matIndex)>>();
 
             foreach (var kvp in session.Analyzers)
             {
                 var go = kvp.Key;
                 if (go == null) continue;
 
-                var renderers = go.GetComponentsInChildren<ParticleSystemRenderer>(true);
+                var renderers = go.GetComponentsInChildren<Renderer>(true);
                 foreach (var renderer in renderers)
                 {
                     if (renderer == null || renderer.sharedMaterials == null) continue;
@@ -1060,12 +1212,7 @@ namespace ResourceManager.Modules
 
                         // 检查是否为内存材质（无 asset 路径）
                         if (string.IsNullOrEmpty(AssetDatabase.GetAssetPath(mat)))
-                        {
                             unsavedMats.Add(mat);
-                            if (!matToRenderer.ContainsKey(mat))
-                                matToRenderer[mat] = new List<(ParticleSystemRenderer, int)>();
-                            matToRenderer[mat].Add((renderer, i));
-                        }
                     }
                 }
             }
@@ -1087,7 +1234,7 @@ namespace ResourceManager.Modules
             int savedCount = 0;
             foreach (var mat in unsavedMats)
             {
-                // 用粒子系统名 + 材质名生成文件名
+                // 用渲染器/材质名生成文件名
                 string matName = mat.name;
                 if (string.IsNullOrEmpty(matName)) matName = "UnnamedMaterial";
 

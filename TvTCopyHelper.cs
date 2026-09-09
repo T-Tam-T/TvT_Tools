@@ -263,7 +263,7 @@ public class TvTCopyHelper
         }
         if (IsHierarchyWindowFocused())
         {
-            return Selection.gameObjects.Any(go => go.GetComponentInChildren<ParticleSystem>(true) != null);
+            return Selection.gameObjects.Any(go => HasCopyableRenderer(go));
         }
         return false;
     }
@@ -297,10 +297,10 @@ public class TvTCopyHelper
         return ValidateSmartDuplicate();
     }
 
-    [MenuItem("GameObject/TvTTools/TvT 智能复制粒子", false, 20)]
+    [MenuItem("GameObject/TvTTools/TvT 智能复制粒子/模型", false, 20)]
     private static void SmartDuplicateParticles() { DuplicateSelectedParticles(null); }
 
-    [MenuItem("GameObject/TvTTools/TvT 智能复制粒子到目录", false, 21)]
+    [MenuItem("GameObject/TvTTools/TvT 智能复制粒子/模型到目录", false, 21)]
     private static void SmartDuplicateParticlesToDirectory()
     {
         string absPath = EditorUtility.OpenFolderPanel("选择材质目标目录", Application.dataPath, "");
@@ -310,7 +310,7 @@ public class TvTCopyHelper
         string absPathNormalized = absPath.Replace("\\", "/");
         if (!absPathNormalized.StartsWith(dataPath, StringComparison.OrdinalIgnoreCase))
         {
-            Debug.LogWarning("[TvT 智能复制粒子] 选择的目录不在工程 Assets 下。");
+            Debug.LogWarning("[TvT 智能复制粒子/模型] 选择的目录不在工程 Assets 下。");
             return;
         }
         string targetDir = "Assets" + absPathNormalized.Substring(dataPath.Length);
@@ -318,12 +318,12 @@ public class TvTCopyHelper
         DuplicateSelectedParticles(targetDir);
     }
 
-    [MenuItem("GameObject/TvTTools/TvT 智能复制粒子", true)]
-    [MenuItem("GameObject/TvTTools/TvT 智能复制粒子到目录", true)]
+    [MenuItem("GameObject/TvTTools/TvT 智能复制粒子/模型", true)]
+    [MenuItem("GameObject/TvTTools/TvT 智能复制粒子/模型到目录", true)]
     private static bool ValidateParticleMenus()
     {
         return IsHierarchyWindowFocused() &&
-               Selection.gameObjects.Any(go => go.GetComponentInChildren<ParticleSystem>(true) != null);
+               Selection.gameObjects.Any(go => HasCopyableRenderer(go));
     }
 
     // ============================================================
@@ -348,6 +348,18 @@ public class TvTCopyHelper
     {
         var focused = EditorWindow.focusedWindow;
         return focused != null && focused.GetType().Name == "SceneHierarchyWindow";
+    }
+
+    /// <summary>
+    /// 该对象（或其子对象）是否包含可被智能复制的渲染器（粒子 / Mesh / 蒙皮 Mesh）。
+    /// </summary>
+    private static bool HasCopyableRenderer(GameObject go)
+    {
+        if (go == null) return false;
+        if (go.GetComponentInChildren<ParticleSystem>(true) != null) return true;
+        if (go.GetComponentInChildren<MeshRenderer>(true) != null) return true;
+        if (go.GetComponentInChildren<SkinnedMeshRenderer>(true) != null) return true;
+        return false;
     }
 
     private static void EnsureDirectoryExists(string assetDir)
@@ -456,7 +468,7 @@ public class TvTCopyHelper
         if (newSelection.Count > 0)
             Selection.objects = newSelection.ToArray();
 
-        Debug.Log($"[TvT 智能复制粒子] 完成，复制 {newSelection.Count} 个粒子系统，{totalMaterials} 个材质。");
+        Debug.Log($"[TvT 智能复制粒子/模型] 完成，复制 {newSelection.Count} 个对象（粒子/模型），{totalMaterials} 个材质。");
     }
 
     // ============================================================
@@ -704,11 +716,12 @@ public class TvTCopyHelper
         newGo.name = GameObjectUtility.GetUniqueNameForSibling(sourceGo.transform.parent, sourceGo.name);
         Undo.RegisterCreatedObjectUndo(newGo, "TvT 智能复制粒子");
 
-        var sourceRenderers = sourceGo.GetComponentsInChildren<ParticleSystemRenderer>(true);
-        var newRenderers = newGo.GetComponentsInChildren<ParticleSystemRenderer>(true);
+        var sourceRenderers = sourceGo.GetComponentsInChildren<Renderer>(true);
+        var newRenderers = newGo.GetComponentsInChildren<Renderer>(true);
 
         if (sourceRenderers.Length == 0) return newGo;
 
+        // 复制对象（粒子 / Mesh / 蒙皮 Mesh）所用到的材质，使副本独立于原对象
         var materialMap = new Dictionary<Material, Material>();
 
         foreach (var renderer in sourceRenderers)
@@ -793,7 +806,7 @@ public class TvTCopyHelper
 
                 if (AssetDatabase.CopyAsset(sourcePath, targetPath))
                 {
-                    Debug.Log($"[TvT 智能复制粒子] 材质: {Path.GetFileName(sourcePath)} → {Path.GetFileName(targetPath)}");
+                    Debug.Log($"[TvT 智能复制] 材质: {Path.GetFileName(sourcePath)} → {Path.GetFileName(targetPath)}");
                     return targetPath;
                 }
                 return null;
@@ -816,7 +829,7 @@ public class TvTCopyHelper
 
                 if (AssetDatabase.CopyAsset(sourcePath, targetPath))
                 {
-                    Debug.Log($"[TvT 智能复制粒子] 材质: {Path.GetFileName(sourcePath)} → {Path.GetFileName(targetPath)}");
+                    Debug.Log($"[TvT 智能复制] 材质: {Path.GetFileName(sourcePath)} → {Path.GetFileName(targetPath)}");
                     return targetPath;
                 }
                 return null;
@@ -841,7 +854,7 @@ public class TvTCopyHelper
 
             if (AssetDatabase.CopyAsset(sourcePath, targetPath))
             {
-                Debug.Log($"[TvT 智能复制粒子] 材质: {Path.GetFileName(sourcePath)} → {Path.GetFileName(targetPath)} @ {normalizedTarget}");
+                Debug.Log($"[TvT 智能复制] 材质: {Path.GetFileName(sourcePath)} → {Path.GetFileName(targetPath)} @ {normalizedTarget}");
                 return targetPath;
             }
             return null;

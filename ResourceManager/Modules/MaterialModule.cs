@@ -19,9 +19,28 @@ namespace ResourceManager.Modules
         // 修改：为每个分析对象创建独立的shader折叠状态
         private Dictionary<string, Dictionary<string, bool>> objectShaderFoldouts = new Dictionary<string, Dictionary<string, bool>>();
 
+        // 显示分类方式：false=默认(按对象/预制体名称分开列表)，true=按Shader分组
+        private bool groupByShader = false;
+
         public void DrawMultiObject(AnalysisSession session, ResourceCache cache)
         {
+            // 标题 + 切换显示分类方式按钮
+            EditorGUILayout.BeginHorizontal();
             GUILayout.Label("材质", EditorStyles.boldLabel);
+            GUILayout.FlexibleSpace();
+
+            string toggleText = groupByShader ? "恢复正常排序" : "切换Shader显示";
+            Color origBg = GUI.backgroundColor;
+            if (groupByShader)
+                GUI.backgroundColor = new Color(0.55f, 1f, 0.55f);
+            if (GUILayout.Button(toggleText, GUILayout.Height(20)))
+            {
+                groupByShader = !groupByShader;
+            }
+            GUI.backgroundColor = origBg;
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.Space(2);
 
             if (session.Analyzers.Count == 0)
             {
@@ -181,15 +200,35 @@ namespace ResourceManager.Modules
         {
             if (materials.Count > 0)
             {
-                // 按Shader分组材质
-                GroupMaterialsByShader(materials);
+                if (groupByShader)
+                {
+                    // 按Shader分组材质
+                    GroupMaterialsByShader(materials);
 
-                // 绘制按Shader分组的材质列表
-                DrawShaderGroups(analyzer, objectIdentifier);
+                    // 绘制按Shader分组的材质列表
+                    DrawShaderGroups(analyzer, objectIdentifier);
+                }
+                else
+                {
+                    // 默认：不按Shader分类，直接平铺列出该对象的材质
+                    DrawFlatMaterials(materials, analyzer);
+                }
             }
             else
             {
                 EditorGUILayout.HelpBox("没有找到材质", MessageType.Info);
+            }
+        }
+
+        private void DrawFlatMaterials(List<Material> materials, ResourceAnalyzer analyzer)
+        {
+            var sorted = materials.OrderBy(m => m.name).ToList();
+            for (int mi = 0; mi < sorted.Count; mi++)
+            {
+                using (new UIHelper.ZebraScope(mi))
+                {
+                    DrawMaterial(sorted[mi], analyzer);
+                }
             }
         }
 

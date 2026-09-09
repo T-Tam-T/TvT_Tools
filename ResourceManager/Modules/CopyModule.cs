@@ -10,29 +10,15 @@ namespace ResourceManager.Modules
 {
     public class CopyModule
     {
-        // 粒子系统相关类
-        private class ParticleNode
-        {
-            public GameObject OriginalGameObject;
-            public ParticleSystem ParticleSystem;
-            public string OriginalName;
-            public bool IsSelected;
-            public List<ParticleNode> Children = new List<ParticleNode>();
-        }
-
-        // 粒子系统成员变量
-        private Dictionary<string, ParticleNode> rootNodes = new Dictionary<string, ParticleNode>();
-        private string searchText = "";
-        private string replaceText = "";
-        private string materialCopyPath = "Assets/CopiedMaterials";
-        private Vector2 scrollPosition;
-        private Dictionary<GameObject, bool> foldouts = new Dictionary<GameObject, bool>();
-
         // 资源复制成员变量
         private Dictionary<Object, bool> selectedResources = new Dictionary<Object, bool>();
         private Dictionary<Object, string> resourceRenameMap = new Dictionary<Object, string>();
         private string resourceCopyPath = "Assets/CopiedResources";
         private Vector2 resourceScrollPosition;
+
+        // 查找/替换命名
+        private string searchText = "";
+        private string replaceText = "";
 
         // 折叠状态字典
         private Dictionary<System.Type, bool> _typeFoldouts = new Dictionary<System.Type, bool>();
@@ -47,14 +33,14 @@ namespace ResourceManager.Modules
 
         // 标签页控制
         private int selectedTabIndex = 0;
-        private readonly string[] tabNames = { "粒子系统复制", "资源复制" };
+        private readonly string[] tabNames = { "资源复制", "回档" };
 
         // 命名方式相关成员变量
         private enum NamingMethod
         {
             FindReplace,    // 查找替换
             PrefixSerial,   // 前缀+序号
-            KeepOriginal    // 保持原名称 - 新增选项
+            KeepOriginal    // 保持原名称
         }
 
         private NamingMethod _namingMethod = NamingMethod.FindReplace;
@@ -65,118 +51,74 @@ namespace ResourceManager.Modules
         // 重新指认选项
         private bool _reassignToObjects = true;
 
+        // 回档相关
+        private string rollbackFolder = "Assets/ResourceManagerRollback";
+        private Vector2 rollbackScrollPosition;
+
+        // ----- 回档数据结构 -----
+
+        [System.Serializable]
+        private class RollbackSnapshot
+        {
+            public int version = 1;
+            public string timestamp;                 // 唯一时间戳：yyyyMMdd_HHmmss
+            public List<RollbackObject> objects = new List<RollbackObject>();
+            public List<RollbackTextureRef> materialTextures = new List<RollbackTextureRef>();
+        }
+
+        [System.Serializable]
+        private class RollbackObject
+        {
+            public string key;                       // 对象唯一标识（prefab:路径 / scene:名称）
+            public string name;                      // 显示名
+            public bool isPrefab;
+            public List<RollbackMaterialRef> materials = new List<RollbackMaterialRef>();
+            public List<RollbackMeshRef> meshes = new List<RollbackMeshRef>();
+            public List<RollbackMeshRef> skinnedMeshes = new List<RollbackMeshRef>();
+        }
+
+        [System.Serializable]
+        private class RollbackMaterialRef
+        {
+            public string rendererPath;              // 渲染器相对路径
+            public int materialIndex;
+            public string materialPath;              // 原材质路径
+        }
+
+        [System.Serializable]
+        private class RollbackMeshRef
+        {
+            public string componentPath;             // 组件相对路径
+            public string meshPath;                  // 原网格路径
+        }
+
+        [System.Serializable]
+        private class RollbackTextureRef
+        {
+            public string materialPath;              // 被原地修改的材质资产路径
+            public string propertyName;              // Shader 贴图属性名
+            public string texturePath;               // 原贴图路径
+        }
+
+        // ----- 入口 -----
         public void Draw(AnalysisSession session)
         {
             selectedTabIndex = GUILayout.Toolbar(selectedTabIndex, tabNames);
 
             switch (selectedTabIndex)
             {
-                case 0: // 粒子系统复制
-                    DrawParticleCopyTab(session);
-                    break;
-                case 1: // 资源复制
+                case 0: // 资源复制
                     DrawResourceCopyTab(session);
                     break;
+                case 1: // 回档
+                    DrawRollbackTab(session);
+                    break;
             }
         }
 
-        // 修改粒子系统复制标签页方法
-        private void DrawParticleCopyTab(AnalysisSession session)
-        {
-            GUILayout.Label("粒子系统复制", EditorStyles.boldLabel);
-
-            // 检查是否分析过场景对象
-            if (session.Analyzers.Count == 0)
-            {
-                EditorGUILayout.HelpBox("请先分析场景对象", MessageType.Info);
-                return;
-            }
-
-            // 为每个分析对象构建粒子树
-            bool needsRebuild = false;
-            foreach (var kvp in session.Analyzers)
-            {
-                var targetObject = kvp.Key;
-                string objectName = targetObject.name;
-
-                if (!rootNodes.ContainsKey(objectName) || rootNodes[objectName] == null)
-                {
-                    BuildParticleTree(targetObject, objectName);
-                    needsRebuild = true;
-                }
-            }
-
-            // 检查是否成功构建粒子树
-            if (rootNodes.Count == 0 || rootNodes.All(kvp => kvp.Value == null || (kvp.Value.ParticleSystem == null && kvp.Value.Children.Count == 0)))
-            {
-                EditorGUILayout.HelpBox("未检测到粒子系统", MessageType.Info);
-                return;
-            }
-
-            // 应用搜索过滤
-            string filterStr = string.IsNullOrEmpty(SearchFilter) ? null : SearchFilter.ToLower();
-
-            // 绘制所有对象的粒子树
-            scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition, GUILayout.ExpandHeight(true));
-
-            if (filterStr != null)
-            {
-                int matchCount = rootNodes.Count(kvp => kvp.Value != null && NodeOrChildMatches(kvp.Value, filterStr));
-                if (matchCount == 0)
-                {
-                    EditorGUILayout.HelpBox($"未找到匹配 \"{SearchFilter}\" 的粒子系统", MessageType.Info);
-                }
-                else
-                {
-                    EditorGUILayout.HelpBox($"搜索 \"{SearchFilter}\" → 找到 {matchCount} 个匹配对象", MessageType.Info);
-                }
-            }
-
-            foreach (var kvp in rootNodes)
-            {
-                string objectName = kvp.Key;
-                var rootNode = kvp.Value;
-
-                if (rootNode != null)
-                {
-                    // 搜索过滤：跳过不匹配的对象
-                    if (filterStr != null && !NodeOrChildMatches(rootNode, filterStr))
-                        continue;
-
-                    // 搜索时自动展开
-                    if (filterStr != null)
-                        foldouts[rootNode.OriginalGameObject] = true;
-
-                    // 绘制对象标题
-                    if (!foldouts.ContainsKey(rootNode.OriginalGameObject))
-                    {
-                        foldouts[rootNode.OriginalGameObject] = false;
-                    }
-
-                    foldouts[rootNode.OriginalGameObject] = EditorGUILayout.Foldout(
-                        foldouts[rootNode.OriginalGameObject],
-                        $"{objectName} (粒子系统)",
-                        true
-                    );
-
-                    if (foldouts[rootNode.OriginalGameObject])
-                    {
-                        EditorGUI.indentLevel++;
-                        DrawParticleTree(rootNode);
-                        EditorGUI.indentLevel--;
-                    }
-
-                    EditorGUILayout.Space(10);
-                }
-            }
-
-            EditorGUILayout.EndScrollView();
-
-            // 绘制底部面板
-            DrawParticleBottomPanel();
-        }
-
-        // 资源复制标签页
+        // =====================================================================
+        //  资源复制标签页
+        // =====================================================================
         private void DrawResourceCopyTab(AnalysisSession session)
         {
             GUILayout.Label("资源复制(贴图、材质、模型)", EditorStyles.boldLabel);
@@ -280,7 +222,7 @@ namespace ResourceManager.Modules
                     EditorGUILayout.EndVertical();
                     break;
 
-                case NamingMethod.KeepOriginal: // 新增：保持原名称
+                case NamingMethod.KeepOriginal: // 保持原名称
                     EditorGUILayout.HelpBox("将保持资源的原始名称不变", MessageType.Info);
                     break;
             }
@@ -309,7 +251,7 @@ namespace ResourceManager.Modules
                     EditorGUILayout.HelpBox($"搜索 \"{SearchFilter}\" → 找到 {allResources.Count} 个匹配资源", MessageType.Info);
 
                 var resourcesByType = allResources.Keys
-                    .Where(r => r != null) // 添加空值检查
+                    .Where(r => r != null)
                     .GroupBy(r => r.GetType())
                     .OrderBy(g => g.Key.Name);
 
@@ -320,13 +262,11 @@ namespace ResourceManager.Modules
                         _typeFoldouts[typeGroup.Key] = false;
                     }
 
-                    // 搜索时自动展开
                     if (filterStr != null)
                         _typeFoldouts[typeGroup.Key] = true;
 
                     EditorGUILayout.BeginVertical("box");
 
-                    // 类型标题和全选按钮
                     GUILayout.BeginHorizontal();
                     _typeFoldouts[typeGroup.Key] = EditorGUILayout.Foldout(
                         _typeFoldouts[typeGroup.Key],
@@ -336,7 +276,6 @@ namespace ResourceManager.Modules
 
                     GUILayout.FlexibleSpace();
 
-                    // 类型全选按钮
                     string typeKey = typeGroup.Key.Name;
                     if (!_categoryAllSelected.ContainsKey(typeKey))
                     {
@@ -355,7 +294,7 @@ namespace ResourceManager.Modules
                     if (_typeFoldouts[typeGroup.Key])
                     {
                         var resourcesByFolder = typeGroup
-                            .Where(r => r != null) // 添加空值检查
+                            .Where(r => r != null)
                             .GroupBy(r => {
                                 string path = AssetDatabase.GetAssetPath(r);
                                 return string.IsNullOrEmpty(path) ? "未知路径" : Path.GetDirectoryName(path);
@@ -372,7 +311,6 @@ namespace ResourceManager.Modules
                                 _folderFoldouts[folderPath] = false;
                             }
 
-                            // 搜索时自动展开
                             if (filterStr != null)
                                 _folderFoldouts[folderPath] = true;
 
@@ -383,7 +321,6 @@ namespace ResourceManager.Modules
                             if (string.IsNullOrEmpty(folderName))
                                 folderName = folderPath;
 
-                            // 文件夹标题和全选按钮
                             GUILayout.BeginHorizontal();
                             _folderFoldouts[folderPath] = EditorGUILayout.Foldout(
                                 _folderFoldouts[folderPath],
@@ -393,7 +330,6 @@ namespace ResourceManager.Modules
 
                             GUILayout.FlexibleSpace();
 
-                            // 文件夹全选按钮
                             if (!_folderAllSelected.ContainsKey(folderPath))
                             {
                                 _folderAllSelected[folderPath] = false;
@@ -439,8 +375,8 @@ namespace ResourceManager.Modules
 
             // 重新指认选项
             EditorGUILayout.BeginVertical("box");
-            _reassignToObjects = EditorGUILayout.Toggle("复制后重新指认给检测对象", _reassignToObjects);
-            EditorGUILayout.HelpBox("启用此选项后，复制的资源将自动替换原对象中使用的资源", MessageType.Info);
+            _reassignToObjects = EditorGUILayout.Toggle("复制后重新指认给检测对象（并生成回档文件）", _reassignToObjects);
+            EditorGUILayout.HelpBox("启用此选项后，复制的资源将自动替换原对象中使用的资源，并在复制前生成一份回档快照（日期+时间命名），可在「回档」标签页还原。", MessageType.Info);
             EditorGUILayout.EndVertical();
 
             if (GUILayout.Button("复制选中的资源", GUILayout.Height(30)))
@@ -473,39 +409,33 @@ namespace ResourceManager.Modules
         }
 
         /// <summary>
-        /// 绘制资源项（与整理模块相同的样式）
+        /// 绘制资源项
         /// </summary>
         private void DrawResourceItem(Object resource)
         {
-            if (resource == null) return; // 添加空值检查
+            if (resource == null) return;
 
             EditorGUILayout.BeginHorizontal();
 
-            // 选择状态显示框（只读）
             if (!selectedResources.ContainsKey(resource))
             {
                 selectedResources[resource] = false;
             }
 
-            // 显示当前选择状态（不可交互）
             EditorGUILayout.Toggle(selectedResources[resource], GUILayout.Width(20));
 
-            // 选择/取消选择按钮
             string buttonText = selectedResources[resource] ? "取消选择" : "选择";
             if (GUILayout.Button(buttonText, GUILayout.Width(60)))
             {
                 selectedResources[resource] = !selectedResources[resource];
-                // 强制重绘界面
                 GUI.changed = true;
             }
 
-            // 资源名称（可编辑）
             if (!resourceRenameMap.ContainsKey(resource))
             {
                 resourceRenameMap[resource] = resource.name;
             }
 
-            // 名称文本框
             EditorGUI.BeginChangeCheck();
             string newName = EditorGUILayout.TextField(
                 resourceRenameMap[resource],
@@ -517,16 +447,13 @@ namespace ResourceManager.Modules
                 resourceRenameMap[resource] = newName;
             }
 
-            // 资源类型标签
             EditorGUILayout.LabelField(
                 GetResourceTypeName(resource),
                 GUILayout.Width(80)
             );
 
-            // 弹性空间，将资源框推到最右边
             GUILayout.FlexibleSpace();
 
-            // 对象字段（资源框）- 放在最右边
             EditorGUILayout.ObjectField(
                 "",
                 resource,
@@ -537,16 +464,12 @@ namespace ResourceManager.Modules
 
             EditorGUILayout.EndHorizontal();
 
-            // 分割线
             EditorGUILayout.Space(2);
             GUI.color = new Color(0.5f, 0.5f, 0.5f, 0.3f);
             GUILayout.Box("", GUILayout.Height(1), GUILayout.ExpandWidth(true));
             GUI.color = Color.white;
         }
 
-        /// <summary>
-        /// 设置类型选择状态
-        /// </summary>
         private void SetTypeSelection(string typeKey, List<Object> resources, bool selected)
         {
             foreach (var resource in resources)
@@ -555,9 +478,6 @@ namespace ResourceManager.Modules
             }
         }
 
-        /// <summary>
-        /// 设置文件夹选择状态
-        /// </summary>
         private void SetFolderSelection(string folderPath, List<Object> resources, bool selected)
         {
             foreach (var resource in resources)
@@ -566,301 +486,41 @@ namespace ResourceManager.Modules
             }
         }
 
-        /// <summary>
-        /// 全局全选
-        /// </summary>
         private void SelectAllResources()
         {
             foreach (var resource in selectedResources.Keys.ToList())
             {
                 selectedResources[resource] = true;
             }
-
-            // 同时更新所有分类的全选状态
             foreach (var categoryKey in _categoryAllSelected.Keys.ToList())
             {
                 _categoryAllSelected[categoryKey] = true;
             }
-
             foreach (var folderKey in _folderAllSelected.Keys.ToList())
             {
                 _folderAllSelected[folderKey] = true;
             }
         }
 
-        /// <summary>
-        /// 清除选择
-        /// </summary>
         private void ClearSelection()
         {
             foreach (var resource in selectedResources.Keys.ToList())
             {
                 selectedResources[resource] = false;
             }
-
-            // 同时更新所有分类的全选状态
             foreach (var categoryKey in _categoryAllSelected.Keys.ToList())
             {
                 _categoryAllSelected[categoryKey] = false;
             }
-
             foreach (var folderKey in _folderAllSelected.Keys.ToList())
             {
                 _folderAllSelected[folderKey] = false;
             }
         }
 
-        /// <summary>
-        /// 检查节点或其子节点是否匹配搜索关键词
-        /// </summary>
-        private bool NodeOrChildMatches(ParticleNode node, string filterStr)
-        {
-            if (node == null) return false;
-            if (node.OriginalName != null && node.OriginalName.ToLower().Contains(filterStr))
-                return true;
-            foreach (var child in node.Children)
-            {
-                if (NodeOrChildMatches(child, filterStr)) return true;
-            }
-            return false;
-        }
-
-        // 构建粒子树
-        private void BuildParticleTree(GameObject root, string objectName)
-        {
-            var rootNode = new ParticleNode
-            {
-                OriginalGameObject = root,
-                ParticleSystem = root.GetComponent<ParticleSystem>(),
-                OriginalName = root.name
-            };
-
-            BuildTreeRecursive(root, rootNode);
-            rootNodes[objectName] = rootNode;
-        }
-
-        private void BuildTreeRecursive(GameObject current, ParticleNode parentNode)
-        {
-            foreach (Transform child in current.transform)
-            {
-                var particle = child.GetComponent<ParticleSystem>();
-                var node = new ParticleNode
-                {
-                    OriginalGameObject = child.gameObject,
-                    ParticleSystem = particle,
-                    OriginalName = child.name
-                };
-
-                parentNode.Children.Add(node);
-                BuildTreeRecursive(child.gameObject, node);
-            }
-        }
-
-        // 绘制粒子树
-    private void DrawParticleTree(ParticleNode node, int depth = 0)
-    {
-        // 搜索过滤：跳过不匹配的节点
-        string filterStr = string.IsNullOrEmpty(SearchFilter) ? null : SearchFilter.ToLower();
-        if (filterStr != null && !NodeOrChildMatches(node, filterStr))
-            return;
-
-        // 搜索时自动展开子节点
-        if (filterStr != null && foldouts.ContainsKey(node.OriginalGameObject))
-            foldouts[node.OriginalGameObject] = true;
-
-        EditorGUILayout.BeginHorizontal();
-        GUILayout.Space(depth * 15);
-
-            // 显示选择框（仅当有粒子系统时）
-            if (node.ParticleSystem != null)
-            {
-                bool newSelected = EditorGUILayout.Toggle(node.IsSelected, GUILayout.Width(20));
-                if (newSelected != node.IsSelected)
-                {
-                    node.IsSelected = newSelected;
-                    SetChildrenSelected(node, newSelected);
-                }
-            }
-            else
-            {
-                GUILayout.Space(24); // 保持对齐
-            }
-
-            // 显示节点名称（灰色显示无粒子系统的节点）
-            bool hasParticleSystem = node.ParticleSystem != null;
-            Color originalColor = GUI.color;
-            if (!hasParticleSystem) GUI.color = Color.gray;
-
-            // 显示折叠组件
-            if (!foldouts.ContainsKey(node.OriginalGameObject))
-            {
-                foldouts[node.OriginalGameObject] = false;
-            }
-            foldouts[node.OriginalGameObject] = EditorGUILayout.Foldout(
-                foldouts[node.OriginalGameObject],
-                $"{node.OriginalName} {(hasParticleSystem ? "(Particle)" : "")}"
-            );
-
-            GUI.color = originalColor;
-            EditorGUILayout.EndHorizontal();
-
-            // 递归绘制子节点
-            if (foldouts[node.OriginalGameObject])
-            {
-                foreach (var child in node.Children)
-                {
-                    DrawParticleTree(child, depth + 1);
-                }
-            }
-        }
-
-        private void SetChildrenSelected(ParticleNode node, bool selected)
-        {
-            node.IsSelected = selected;
-            foreach (var child in node.Children)
-            {
-                SetChildrenSelected(child, selected);
-            }
-        }
-
-        private void CollectSelectedParticles(ParticleNode node, List<ParticleNode> selected)
-        {
-            if (node.IsSelected && node.ParticleSystem != null)
-            {
-                selected.Add(node);
-            }
-
-            foreach (var child in node.Children)
-            {
-                CollectSelectedParticles(child, selected);
-            }
-        }
-
-        private void DrawParticleBottomPanel()
-        {
-            EditorGUILayout.Space(10);
-            GUILayout.BeginVertical("Box");
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("查找:", GUILayout.Width(40));
-            searchText = EditorGUILayout.TextField(searchText);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("替换:", GUILayout.Width(40));
-            replaceText = EditorGUILayout.TextField(replaceText);
-            GUILayout.EndHorizontal();
-
-            EditorGUILayout.Space(5);
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("材质路径:", GUILayout.Width(60));
-            materialCopyPath = EditorGUILayout.TextField(materialCopyPath);
-            if (GUILayout.Button("浏览", GUILayout.Width(50)))
-            {
-                string path = EditorUtility.SaveFolderPanel("选择材质保存路径", Application.dataPath, "");
-                if (!string.IsNullOrEmpty(path))
-                {
-                    if (path.StartsWith(Application.dataPath))
-                    {
-                        materialCopyPath = "Assets" + path.Substring(Application.dataPath.Length);
-                    }
-                    else
-                    {
-                        Debug.LogError("路径必须在Assets目录下");
-                    }
-                }
-            }
-            GUILayout.EndHorizontal();
-
-            EditorGUILayout.Space(5);
-
-            if (GUILayout.Button("复制粒子系统及材质", GUILayout.Height(30)))
-            {
-                CopySelectedParticles();
-            }
-
-            GUILayout.EndVertical();
-        }
-
-        private void CopySelectedParticles()
-        {
-            if (rootNodes.Count == 0) return;
-
-            // 确保材质保存路径存在
-            if (!AssetDatabase.IsValidFolder(materialCopyPath))
-            {
-                AssetDatabase.CreateFolder("Assets", "CopiedMaterials");
-                materialCopyPath = "Assets/CopiedMaterials";
-            }
-
-            // 收集所有选中的粒子系统
-            var selectedParticles = new List<ParticleNode>();
-            foreach (var rootNode in rootNodes.Values)
-            {
-                if (rootNode != null)
-                {
-                    CollectSelectedParticles(rootNode, selectedParticles);
-                }
-            }
-
-            // 过滤掉没有粒子系统的节点
-            selectedParticles = selectedParticles.Where(node => node.ParticleSystem != null).ToList();
-
-            if (selectedParticles.Count == 0)
-            {
-                Debug.LogWarning("没有选中任何粒子系统");
-                return;
-            }
-
-            // 创建父对象
-            GameObject parentObject = new GameObject("CopiedParticles");
-
-            foreach (var node in selectedParticles)
-            {
-                // 复制粒子系统游戏对象
-                GameObject copiedParticle = Object.Instantiate(node.ParticleSystem.gameObject);
-                copiedParticle.transform.SetParent(parentObject.transform);
-
-                // 重命名游戏对象
-                string newName = node.OriginalName.Replace(searchText, replaceText);
-                copiedParticle.name = newName;
-
-                // 复制并替换材质
-                var renderer = copiedParticle.GetComponent<ParticleSystemRenderer>();
-                if (renderer != null)
-                {
-                    Material[] sharedMaterials = renderer.sharedMaterials;
-                    Material[] copiedMaterials = new Material[sharedMaterials.Length];
-
-                    for (int i = 0; i < sharedMaterials.Length; i++)
-                    {
-                        if (sharedMaterials[i] != null)
-                        {
-                            // 复制材质
-                            Material copiedMaterial = new Material(sharedMaterials[i]);
-                            string materialName = sharedMaterials[i].name.Replace(searchText, replaceText);
-                            copiedMaterial.name = materialName;
-
-                            // 保存材质
-                            string materialPath = $"{materialCopyPath}/{materialName}.mat";
-                            AssetDatabase.CreateAsset(copiedMaterial, materialPath);
-
-                            copiedMaterials[i] = copiedMaterial;
-                        }
-                    }
-
-                    // 应用新材质
-                    renderer.sharedMaterials = copiedMaterials;
-                }
-            }
-
-            AssetDatabase.SaveAssets();
-            AssetDatabase.Refresh();
-            Debug.Log($"成功复制 {selectedParticles.Count} 个粒子系统");
-        }
-
-        // 资源复制相关方法
+        // =====================================================================
+        //  资源复制执行 + 回档快照
+        // =====================================================================
         private void CopySelectedResources(AnalysisSession session)
         {
             if (selectedResources.Count == 0 || !selectedResources.Any(kvp => kvp.Value))
@@ -875,6 +535,13 @@ namespace ResourceManager.Modules
                 string folderName = Path.GetFileName(resourceCopyPath);
                 if (string.IsNullOrEmpty(parentFolder)) parentFolder = "Assets";
                 AssetDatabase.CreateFolder(parentFolder, folderName);
+            }
+
+            // ---- 在修改任何引用之前，捕获回档快照（记录“之前”的资源引用） ----
+            RollbackSnapshot beforeSnapshot = null;
+            if (_reassignToObjects)
+            {
+                beforeSnapshot = CaptureBeforeSnapshot(session);
             }
 
             Dictionary<Object, Object> copiedResources = new Dictionary<Object, Object>();
@@ -899,7 +566,6 @@ namespace ResourceManager.Modules
                         {
                             if (mat == null) continue;
                             if (autoMaterials.Contains(mat)) continue;
-                            // 跳过用户已手动选中的材质
                             if (selectedResources.ContainsKey(mat) && selectedResources[mat]) continue;
 
                             Shader shader = mat.shader;
@@ -933,14 +599,11 @@ namespace ResourceManager.Modules
                 CopyResource(texture, ref currentIndex, copiedResources);
             }
 
-            // 在自动检测到的原始材质上原地替换贴图引用（不复制材质球）
-            // 正确流程：选中贴图 α → 复制 α' → 材质 M 的 α 引用原地指向 α'
             foreach (var mat in autoMaterials)
             {
                 UpdateMaterialTextures(mat, copiedResources);
             }
 
-            // 处理用户手动选中的材质（这些才需要复制并替换）
             var userMaterials = selectedResources
                 .Where(kvp => kvp.Value && kvp.Key is Material)
                 .Select(kvp => kvp.Key)
@@ -980,6 +643,14 @@ namespace ResourceManager.Modules
                     }
                 }
                 Debug.Log($"成功将 {copiedResources.Count} 个资源重新指认给分析对象");
+
+                // ---- 真正发生了重新指认，保存回档快照 ----
+                if (beforeSnapshot != null && beforeSnapshot.objects.Count > 0)
+                {
+                    beforeSnapshot.timestamp = System.DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                    string snapshotPath = SaveRollbackSnapshot(beforeSnapshot);
+                    Debug.Log($"[CopyModule] 已生成回档文件: {snapshotPath}");
+                }
             }
 
             Debug.Log($"成功复制 {copiedResources.Count} 个资源到 {resourceCopyPath}");
@@ -1000,7 +671,7 @@ namespace ResourceManager.Modules
                     currentIndex++;
                     break;
 
-                case NamingMethod.KeepOriginal: // 新增：保持原名称
+                case NamingMethod.KeepOriginal:
                     newName = resource.name;
                     break;
 
@@ -1015,7 +686,6 @@ namespace ResourceManager.Modules
             string extension = Path.GetExtension(originalPath);
             string newPath = $"{resourceCopyPath}/{newName}{extension}";
 
-            // 处理文件名冲突
             int counter = 1;
             string basePath = newPath;
             while (AssetDatabase.LoadAssetAtPath(newPath, resource.GetType()) != null)
@@ -1113,8 +783,6 @@ namespace ResourceManager.Modules
                 }
             }
 
-            // 处理 ParticleSystem 中引用的 Mesh（Shape 模块 & Renderer Mesh 模式）
-            // 复制模型后需同步更新粒子系统的 mesh 引用
             ParticleSystem[] particleSystems = root.GetComponentsInChildren<ParticleSystem>(true);
             foreach (ParticleSystem ps in particleSystems)
             {
@@ -1122,9 +790,6 @@ namespace ResourceManager.Modules
 
                 var shape = ps.shape;
 
-                // Shape 类型为 Mesh 时：直接更新 shape.mesh 引用
-                // （MeshRenderer / SkinnedMeshRenderer 类型会通过上方 MeshFilter/SkinnedMeshRenderer
-                //   的更新自动感知，无需额外处理）
                 if (shape.shapeType == ParticleSystemShapeType.Mesh)
                 {
                     if (shape.mesh != null && copiedResources.TryGetValue(shape.mesh, out Object newShapeMesh))
@@ -1133,7 +798,6 @@ namespace ResourceManager.Modules
                     }
                 }
 
-                // 处理 ParticleSystemRenderer 的 mesh 引用（Render Mode = Mesh 时）
                 var psRenderer = ps.GetComponent<ParticleSystemRenderer>();
                 if (psRenderer != null && psRenderer.renderMode == ParticleSystemRenderMode.Mesh)
                 {
@@ -1158,6 +822,618 @@ namespace ResourceManager.Modules
             Debug.Log($"成功将 {copiedResources.Count} 个资源重新指认给分析对象");
         }
 
+        // =====================================================================
+        //  回档：快照生成 / 读取 / 还原
+        // =====================================================================
+
+        /// <summary>
+        /// 捕获某个分析对象“当前”的资源引用（材质 + 网格），作为回档基准。
+        /// </summary>
+        private RollbackSnapshot CaptureBeforeSnapshot(AnalysisSession session)
+        {
+            var snap = new RollbackSnapshot { version = 1 };
+            var seenMaterials = new HashSet<Material>();
+            foreach (var kvp in session.Analyzers)
+            {
+                var go = kvp.Key;
+                if (go == null) continue;
+                var objSnap = CaptureObjectSnapshot(go);
+                if (objSnap != null &&
+                    (objSnap.materials.Count > 0 || objSnap.meshes.Count > 0 || objSnap.skinnedMeshes.Count > 0))
+                {
+                    snap.objects.Add(objSnap);
+                }
+
+                // 收集对象用到的所有材质及其内部贴图引用（用于“材质内原地替换贴图”的回档）
+                if (objSnap != null)
+                {
+                    foreach (var renderer in go.GetComponentsInChildren<Renderer>(true))
+                    {
+                        if (renderer == null || renderer.sharedMaterials == null) continue;
+                        foreach (var mat in renderer.sharedMaterials)
+                        {
+                            if (mat == null || seenMaterials.Contains(mat)) continue;
+                            seenMaterials.Add(mat);
+                            CaptureMaterialTextures(mat, snap.materialTextures);
+                        }
+                    }
+                }
+            }
+            return snap;
+        }
+
+        private void CaptureMaterialTextures(Material mat, List<RollbackTextureRef> list)
+        {
+            if (mat == null || mat.shader == null) return;
+            int propCount = ShaderUtil.GetPropertyCount(mat.shader);
+            for (int i = 0; i < propCount; i++)
+            {
+                if (ShaderUtil.GetPropertyType(mat.shader, i) == ShaderUtil.ShaderPropertyType.TexEnv)
+                {
+                    string propName = ShaderUtil.GetPropertyName(mat.shader, i);
+                    Texture tex = mat.GetTexture(propName);
+                    if (tex == null) continue;
+                    list.Add(new RollbackTextureRef
+                    {
+                        materialPath = AssetDatabase.GetAssetPath(mat) ?? "",
+                        propertyName = propName,
+                        texturePath = AssetDatabase.GetAssetPath(tex) ?? ""
+                    });
+                }
+            }
+        }
+
+        private RollbackObject CaptureObjectSnapshot(GameObject go)
+        {
+            if (go == null) return null;
+
+            var obj = new RollbackObject
+            {
+                key = GetObjectKey(go),
+                name = go.name,
+                isPrefab = PrefabUtility.IsPartOfPrefabAsset(go)
+            };
+
+            foreach (var renderer in go.GetComponentsInChildren<Renderer>(true))
+            {
+                if (renderer == null || renderer.sharedMaterials == null) continue;
+                var mats = renderer.sharedMaterials;
+                string rendererPath = GetComponentPath(go, renderer.gameObject);
+                for (int i = 0; i < mats.Length; i++)
+                {
+                    if (mats[i] != null)
+                    {
+                        obj.materials.Add(new RollbackMaterialRef
+                        {
+                            rendererPath = rendererPath,
+                            materialIndex = i,
+                            materialPath = AssetDatabase.GetAssetPath(mats[i]) ?? ""
+                        });
+                    }
+                }
+            }
+
+            foreach (var mf in go.GetComponentsInChildren<MeshFilter>(true))
+            {
+                if (mf == null || mf.sharedMesh == null) continue;
+                obj.meshes.Add(new RollbackMeshRef
+                {
+                    componentPath = GetComponentPath(go, mf.gameObject),
+                    meshPath = AssetDatabase.GetAssetPath(mf.sharedMesh) ?? ""
+                });
+            }
+
+            foreach (var sm in go.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+            {
+                if (sm == null || sm.sharedMesh == null) continue;
+                obj.skinnedMeshes.Add(new RollbackMeshRef
+                {
+                    componentPath = GetComponentPath(go, sm.gameObject),
+                    meshPath = AssetDatabase.GetAssetPath(sm.sharedMesh) ?? ""
+                });
+            }
+
+            return obj;
+        }
+
+        private string GetObjectKey(GameObject go)
+        {
+            if (go == null) return "null";
+            if (PrefabUtility.IsPartOfPrefabAsset(go))
+            {
+                string path = AssetDatabase.GetAssetPath(go);
+                return string.IsNullOrEmpty(path) ? ("prefab:" + go.name) : ("prefab:" + path);
+            }
+            return "scene:" + go.name;
+        }
+
+        private string GetComponentPath(GameObject root, GameObject comp)
+        {
+            if (root == null || comp == null) return "";
+            var names = new List<string>();
+            var t = comp.transform;
+            while (t != null && t != root.transform)
+            {
+                names.Insert(0, t.name);
+                t = t.parent;
+            }
+            return string.Join("/", names);
+        }
+
+        private string SaveRollbackSnapshot(RollbackSnapshot snapshot)
+        {
+            if (!AssetDatabase.IsValidFolder(rollbackFolder))
+            {
+                string parent = Path.GetDirectoryName(rollbackFolder);
+                string folder = Path.GetFileName(rollbackFolder);
+                if (string.IsNullOrEmpty(parent)) parent = "Assets";
+                if (!AssetDatabase.IsValidFolder(parent))
+                    AssetDatabase.CreateFolder("Assets", Path.GetFileName(parent));
+                AssetDatabase.CreateFolder(parent, folder);
+            }
+
+            string json = JsonUtility.ToJson(snapshot, true);
+            string fileName = $"回档_{snapshot.timestamp}.json";
+            string assetPath = $"{rollbackFolder}/{fileName}";
+            string fullPath = Path.Combine(Application.dataPath, assetPath.Substring("Assets/".Length));
+
+            Directory.CreateDirectory(Path.GetDirectoryName(fullPath));
+            File.WriteAllText(fullPath, json, new System.Text.UTF8Encoding(false));
+            AssetDatabase.Refresh();
+            return assetPath;
+        }
+
+        private List<KeyValuePair<string, RollbackSnapshot>> LoadAllSnapshots()
+        {
+            var result = new List<KeyValuePair<string, RollbackSnapshot>>();
+            if (!AssetDatabase.IsValidFolder(rollbackFolder)) return result;
+
+            string fullDir = Path.Combine(Application.dataPath, rollbackFolder.Substring("Assets/".Length));
+            if (!Directory.Exists(fullDir)) return result;
+
+            foreach (var file in Directory.GetFiles(fullDir, "*.json"))
+            {
+                try
+                {
+                    string json = File.ReadAllText(file);
+                    var snap = JsonUtility.FromJson<RollbackSnapshot>(json);
+                    if (snap != null)
+                    {
+                        result.Add(new KeyValuePair<string, RollbackSnapshot>(Path.GetFileName(file), snap));
+                    }
+                }
+                catch (System.Exception e)
+                {
+                    Debug.LogWarning($"[CopyModule] 读取回档失败: {file} ({e.Message})");
+                }
+            }
+
+            // 最新在前
+            return result.OrderByDescending(kvp => kvp.Value != null ? kvp.Value.timestamp : "").ToList();
+        }
+
+        // =====================================================================
+        //  回档标签页
+        // =====================================================================
+        private int selectedSnapshotIndex = -1;
+
+        /// <summary>
+        /// 回档对比行：一次“当前资源 → 回档资源”的变更。
+        /// </summary>
+        private class RollbackDiffRow
+        {
+            public string objectName;
+            public string slotLabel;
+            public string currentPath;
+            public string beforePath;
+            public string kind;            // material / mesh / skinnedMesh / texture
+            public string componentPath;   // material/mesh 的组件相对路径
+            public int materialIndex;      // material 的槽位
+            public string materialPath;    // texture 的材质路径
+            public string propertyName;    // texture 的属性名
+        }
+
+        private void DrawRollbackTab(AnalysisSession session)
+        {
+            GUILayout.Label("回档（资源还原）", EditorStyles.boldLabel);
+            EditorGUILayout.HelpBox(
+                "资源复制并重新指认后，会生成按「日期_时间」命名的回档文件。\n" +
+                "选择一个回档日期，即可查看「当前资源 → 回档资源」的对比；点击下方「确认回档」进行还原。\n" +
+                "若历史资源已被删除，将无法还原并会在 Console 提示。",
+                MessageType.Info);
+
+            if (session.Analyzers.Count == 0)
+            {
+                EditorGUILayout.HelpBox("请先分析对象", MessageType.Info);
+                return;
+            }
+
+            var snapshots = LoadAllSnapshots();
+
+            if (snapshots.Count == 0)
+            {
+                EditorGUILayout.HelpBox("暂无回档记录。执行一次「资源复制（并重新指认）」后会生成回档文件。", MessageType.Info);
+                return;
+            }
+
+            // ---- 回档日期下拉（所有快照，最新在前）----
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Label("回档日期:", GUILayout.Width(70));
+            if (selectedSnapshotIndex < 0) selectedSnapshotIndex = 0;
+            if (selectedSnapshotIndex >= snapshots.Count) selectedSnapshotIndex = 0;
+
+            string[] dateStrings = snapshots.Select(s => FormatTimestamp(s.Value.timestamp)).ToArray();
+            selectedSnapshotIndex = EditorGUILayout.Popup(selectedSnapshotIndex, dateStrings, GUILayout.ExpandWidth(true));
+            EditorGUILayout.EndHorizontal();
+
+            var selected = snapshots[selectedSnapshotIndex];
+
+            EditorGUILayout.Space(6);
+
+            // ---- 变更对比列表（仅显示真正发生变化的引用）----
+            var diffRows = BuildRollbackDiffRows(session, selected.Value);
+
+            rollbackScrollPosition = EditorGUILayout.BeginScrollView(rollbackScrollPosition, GUILayout.ExpandHeight(true));
+
+            if (diffRows.Count == 0)
+            {
+                EditorGUILayout.HelpBox(
+                    "所选回档日期与当前分析对象没有匹配的变更。\n" +
+                    "可能该对象未参与这次复制，或当前资源已与回档一致。",
+                    MessageType.Info);
+            }
+            else
+            {
+                EditorGUILayout.HelpBox($"共 {diffRows.Count} 处变更。点击下方「确认回档」会把「当前资源」还原为「回档资源」。", MessageType.Info);
+
+                int zebra = 0;
+                foreach (var objGroup in diffRows.GroupBy(r => r.objectName))
+                {
+                    EditorGUILayout.LabelField($"— {objGroup.Key} —", EditorStyles.boldLabel);
+
+                    foreach (var row in objGroup)
+                    {
+                        using (new UIHelper.ZebraScope(zebra))
+                        {
+                            EditorGUILayout.BeginVertical("box");
+                            EditorGUILayout.BeginHorizontal();
+                            GUILayout.Label(row.slotLabel, GUILayout.Width(150));
+                            GUILayout.FlexibleSpace();
+                            EditorGUILayout.LabelField("当前:", EditorStyles.miniLabel, GUILayout.Width(30));
+                            EditorGUILayout.SelectableLabel(row.currentPath, EditorStyles.miniLabel, GUILayout.Width(160));
+                            GUILayout.Label("→", GUILayout.Width(14));
+                            EditorGUILayout.LabelField("回档:", EditorStyles.miniLabel, GUILayout.Width(30));
+                            EditorGUILayout.SelectableLabel(row.beforePath, EditorStyles.miniLabel, GUILayout.Width(160));
+                            EditorGUILayout.EndHorizontal();
+                            EditorGUILayout.EndVertical();
+                        }
+                        zebra++;
+                    }
+                    EditorGUILayout.Space(4);
+                }
+            }
+
+            EditorGUILayout.EndScrollView();
+
+            EditorGUILayout.Space(10);
+
+            // ---- 确认回档按钮 ----
+            if (GUILayout.Button("确认回档", GUILayout.Height(32)))
+            {
+                bool allOk = RestoreSnapshot(session, selected.Value, selected.Key);
+                EditorUtility.DisplayDialog(
+                    "回档完成",
+                    allOk
+                        ? $"已将匹配对象还原到 {FormatTimestamp(selected.Value.timestamp)}。"
+                        : $"存在已删除或不匹配的资源，未能完全还原，请查看 Console。",
+                    "确定");
+            }
+        }
+
+        private string FormatTimestamp(string ts)
+        {
+            if (string.IsNullOrEmpty(ts)) return "未知时间";
+            if (ts.Length >= 15)
+            {
+                return $"{ts.Substring(0, 4)}-{ts.Substring(4, 2)}-{ts.Substring(6, 2)} {ts.Substring(9, 2)}:{ts.Substring(11, 2)}:{ts.Substring(13, 2)}";
+            }
+            return ts;
+        }
+
+        /// <summary>
+        /// 还原单个对象到指定快照。返回是否全部成功（无删除/不匹配）。
+        /// </summary>
+        private bool RestoreObjectToSnapshot(GameObject go, RollbackSnapshot snapshot, string fileName)
+        {
+            if (go == null || snapshot == null) return false;
+            var objSnap = snapshot.objects.FirstOrDefault(o => o.key == GetObjectKey(go));
+            if (objSnap == null) return false;
+
+            bool allOk = true;
+            bool fileDirty = false;
+
+            // 还原材质
+            foreach (var m in objSnap.materials)
+            {
+                var targetGo = FindChildByPath(go, m.rendererPath);
+                if (targetGo == null) continue;
+                var renderer = targetGo.GetComponent<Renderer>();
+                if (renderer == null || renderer.sharedMaterials == null) continue;
+
+                var mats = renderer.sharedMaterials;
+                if (m.materialIndex < 0 || m.materialIndex >= mats.Length) continue;
+
+                var original = string.IsNullOrEmpty(m.materialPath)
+                    ? null
+                    : AssetDatabase.LoadAssetAtPath<Material>(m.materialPath);
+                if (original == null)
+                {
+                    allOk = false;
+                    Debug.LogWarning($"[回档] 历史材质已删除，无法还原: {m.materialPath} ({go.name}/{m.rendererPath}[{m.materialIndex}])");
+                    continue;
+                }
+
+                if (mats[m.materialIndex] != original)
+                {
+                    mats[m.materialIndex] = original;
+                    renderer.sharedMaterials = mats;
+                    fileDirty = true;
+                }
+            }
+
+            // 还原 MeshFilter 网格
+            foreach (var mm in objSnap.meshes)
+            {
+                var targetGo = FindChildByPath(go, mm.componentPath);
+                if (targetGo == null) continue;
+                var mf = targetGo.GetComponent<MeshFilter>();
+                if (mf == null) continue;
+
+                var original = string.IsNullOrEmpty(mm.meshPath)
+                    ? null
+                    : AssetDatabase.LoadAssetAtPath<Mesh>(mm.meshPath);
+                if (original == null)
+                {
+                    allOk = false;
+                    Debug.LogWarning($"[回档] 历史网格已删除，无法还原: {mm.meshPath} ({go.name}/{mm.componentPath})");
+                    continue;
+                }
+
+                if (mf.sharedMesh != original)
+                {
+                    mf.sharedMesh = original;
+                    fileDirty = true;
+                }
+            }
+
+            // 还原 SkinnedMeshRenderer 网格
+            foreach (var sm in objSnap.skinnedMeshes)
+            {
+                var targetGo = FindChildByPath(go, sm.componentPath);
+                if (targetGo == null) continue;
+                var skinned = targetGo.GetComponent<SkinnedMeshRenderer>();
+                if (skinned == null) continue;
+
+                var original = string.IsNullOrEmpty(sm.meshPath)
+                    ? null
+                    : AssetDatabase.LoadAssetAtPath<Mesh>(sm.meshPath);
+                if (original == null)
+                {
+                    allOk = false;
+                    Debug.LogWarning($"[回档] 历史网格已删除，无法还原: {sm.meshPath} ({go.name}/{sm.componentPath})");
+                    continue;
+                }
+
+                if (skinned.sharedMesh != original)
+                {
+                    skinned.sharedMesh = original;
+                    fileDirty = true;
+                }
+            }
+
+            if (fileDirty)
+            {
+                EditorUtility.SetDirty(go);
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh();
+                Debug.Log($"[回档] {go.name} 已还原到 {snapshot.timestamp}（来自 {fileName}）");
+            }
+
+            return allOk;
+        }
+
+        private bool RestoreSnapshot(AnalysisSession session, RollbackSnapshot snapshot, string fileName)
+        {
+            if (snapshot == null) return false;
+            bool allOk = true;
+            foreach (var kvp in session.Analyzers)
+            {
+                var go = kvp.Key;
+                if (go == null) continue;
+                if (snapshot.objects.Any(o => o.key == GetObjectKey(go)))
+                {
+                    if (!RestoreObjectToSnapshot(go, snapshot, fileName))
+                        allOk = false;
+                }
+            }
+            if (!RestoreMaterialTextures(snapshot))
+                allOk = false;
+            return allOk;
+        }
+
+        /// <summary>
+        /// 还原材质内被原地替换的贴图引用。
+        /// </summary>
+        private bool RestoreMaterialTextures(RollbackSnapshot snapshot)
+        {
+            if (snapshot == null || snapshot.materialTextures == null) return true;
+            bool allOk = true;
+            bool dirty = false;
+            foreach (var t in snapshot.materialTextures)
+            {
+                if (string.IsNullOrEmpty(t.materialPath) || string.IsNullOrEmpty(t.propertyName)) continue;
+                var mat = AssetDatabase.LoadAssetAtPath<Material>(t.materialPath);
+                if (mat == null)
+                {
+                    allOk = false;
+                    Debug.LogWarning($"[回档] 材质已删除，无法还原贴图: {t.materialPath}");
+                    continue;
+                }
+                var original = string.IsNullOrEmpty(t.texturePath)
+                    ? null
+                    : AssetDatabase.LoadAssetAtPath<Texture>(t.texturePath);
+                if (original == null)
+                {
+                    allOk = false;
+                    Debug.LogWarning($"[回档] 历史贴图已删除，无法还原: {t.texturePath} (材质 {t.materialPath} · {t.propertyName})");
+                    continue;
+                }
+                Texture cur = mat.GetTexture(t.propertyName);
+                if (cur != original)
+                {
+                    mat.SetTexture(t.propertyName, original);
+                    EditorUtility.SetDirty(mat);
+                    dirty = true;
+                }
+            }
+            if (dirty)
+            {
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh();
+            }
+            return allOk;
+        }
+
+        /// <summary>
+        /// 构建「当前资源 → 回档资源」的变更对比行（仅包含真正发生变化的引用）。
+        /// </summary>
+        private List<RollbackDiffRow> BuildRollbackDiffRows(AnalysisSession session, RollbackSnapshot snapshot)
+        {
+            var rows = new List<RollbackDiffRow>();
+            if (snapshot == null) return rows;
+
+            foreach (var kvp in session.Analyzers)
+            {
+                var go = kvp.Key;
+                if (go == null) continue;
+                var objSnap = snapshot.objects.FirstOrDefault(o => o.key == GetObjectKey(go));
+                if (objSnap == null) continue;
+
+                foreach (var m in objSnap.materials)
+                {
+                    var targetGo = FindChildByPath(go, m.rendererPath);
+                    if (targetGo == null) continue;
+                    var renderer = targetGo.GetComponent<Renderer>();
+                    if (renderer == null || renderer.sharedMaterials == null) continue;
+                    var mats = renderer.sharedMaterials;
+                    if (m.materialIndex < 0 || m.materialIndex >= mats.Length) continue;
+                    string current = mats[m.materialIndex] != null ? AssetDatabase.GetAssetPath(mats[m.materialIndex]) : "";
+                    if (current == m.materialPath) continue;
+                    rows.Add(new RollbackDiffRow
+                    {
+                        objectName = go.name,
+                        slotLabel = $"材质[{m.materialIndex}]",
+                        currentPath = ShortName(current),
+                        beforePath = ShortName(m.materialPath),
+                        kind = "material",
+                        componentPath = m.rendererPath,
+                        materialIndex = m.materialIndex
+                    });
+                }
+
+                foreach (var mm in objSnap.meshes)
+                {
+                    var targetGo = FindChildByPath(go, mm.componentPath);
+                    if (targetGo == null) continue;
+                    var mf = targetGo.GetComponent<MeshFilter>();
+                    if (mf == null || mf.sharedMesh == null) continue;
+                    string current = AssetDatabase.GetAssetPath(mf.sharedMesh);
+                    if (current == mm.meshPath) continue;
+                    rows.Add(new RollbackDiffRow
+                    {
+                        objectName = go.name,
+                        slotLabel = "网格",
+                        currentPath = ShortName(current),
+                        beforePath = ShortName(mm.meshPath),
+                        kind = "mesh",
+                        componentPath = mm.componentPath
+                    });
+                }
+
+                foreach (var sm in objSnap.skinnedMeshes)
+                {
+                    var targetGo = FindChildByPath(go, sm.componentPath);
+                    if (targetGo == null) continue;
+                    var skinned = targetGo.GetComponent<SkinnedMeshRenderer>();
+                    if (skinned == null || skinned.sharedMesh == null) continue;
+                    string current = AssetDatabase.GetAssetPath(skinned.sharedMesh);
+                    if (current == sm.meshPath) continue;
+                    rows.Add(new RollbackDiffRow
+                    {
+                        objectName = go.name,
+                        slotLabel = "蒙皮网格",
+                        currentPath = ShortName(current),
+                        beforePath = ShortName(sm.meshPath),
+                        kind = "skinnedMesh",
+                        componentPath = sm.componentPath
+                    });
+                }
+            }
+
+            // 材质内贴图引用变更（快照级，去重显示）
+            if (snapshot.materialTextures != null)
+            {
+                foreach (var t in snapshot.materialTextures)
+                {
+                    if (string.IsNullOrEmpty(t.materialPath) || string.IsNullOrEmpty(t.propertyName)) continue;
+                    var mat = AssetDatabase.LoadAssetAtPath<Material>(t.materialPath);
+                    if (mat == null) continue;
+                    Texture cur = mat.GetTexture(t.propertyName);
+                    string current = cur != null ? AssetDatabase.GetAssetPath(cur) : "";
+                    if (current == t.texturePath) continue;
+                    rows.Add(new RollbackDiffRow
+                    {
+                        objectName = "材质: " + mat.name,
+                        slotLabel = $"贴图[{t.propertyName}]",
+                        currentPath = ShortName(current),
+                        beforePath = ShortName(t.texturePath),
+                        kind = "texture",
+                        materialPath = t.materialPath,
+                        propertyName = t.propertyName
+                    });
+                }
+            }
+
+            return rows;
+        }
+
+        private string ShortName(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return "(无)";
+            return Path.GetFileName(path);
+        }
+
+        private GameObject FindChildByPath(GameObject root, string path)
+        {
+            if (root == null) return null;
+            if (string.IsNullOrEmpty(path)) return root;
+            var current = root;
+            foreach (var seg in path.Split('/'))
+            {
+                if (string.IsNullOrEmpty(seg)) continue;
+                var child = current.transform.Find(seg);
+                if (child == null) return null;
+                current = child.gameObject;
+            }
+            return current;
+        }
+
+        // ----- 名称相关 -----
+        private string GenerateExampleName()
+        {
+            return $"{_prefix}_{_startIndex.ToString($"D{_digitCount}")}";
+        }
+
         private string GetTypeDisplayName(System.Type type)
         {
             if (type == typeof(Texture2D)) return "贴图";
@@ -1174,21 +1450,15 @@ namespace ResourceManager.Modules
             return resource.GetType().Name;
         }
 
-        private string GenerateExampleName()
-        {
-            return $"{_prefix}_{_startIndex.ToString($"D{_digitCount}")}";
-        }
-
         public void Clear()
         {
-            rootNodes.Clear();
-            foldouts.Clear();
             selectedResources.Clear();
             resourceRenameMap.Clear();
             _typeFoldouts.Clear();
             _folderFoldouts.Clear();
             _categoryAllSelected.Clear();
             _folderAllSelected.Clear();
+            selectedSnapshotIndex = -1;
         }
     }
 }
