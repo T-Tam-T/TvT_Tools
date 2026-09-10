@@ -99,6 +99,10 @@ namespace ResourceManager.Modules
             public List<TextureRef> refs = new List<TextureRef>();
         }
 
+        // ----- 子标签：贴图去重 / 材质球去重 -----
+        private int subTabIndex = 0;
+        private static readonly string[] subTabNames = { "贴图去重", "材质球去重" };
+
         // ----- IMultiObjectModule 实现 -----
         public void DrawMultiObject(AnalysisSession session, ResourceCache cache)
         {
@@ -108,6 +112,17 @@ namespace ResourceManager.Modules
                 return;
             }
 
+            subTabIndex = GUILayout.Toolbar(subTabIndex, subTabNames);
+            EditorGUILayout.Space(5);
+
+            if (subTabIndex == 0)
+                DrawTextureDedupTab(session, cache);
+            else
+                DrawMaterialDedupTab(session);
+        }
+
+        private void DrawTextureDedupTab(AnalysisSession session, ResourceCache cache)
+        {
             GUILayout.Label("贴图去重（与源文件夹对比）", EditorStyles.boldLabel);
             EditorGUILayout.Space(5);
 
@@ -218,9 +233,406 @@ namespace ResourceManager.Modules
             }
         }
 
+        // =====================================================================
+        //  材质球去重
+        //  把参数完全一致（且未被动画驱动）的 _dedup 材质替换回原名材质，并可回档。
+        // =====================================================================
+
+        private const string DedupSuffix = "_dedup";
+        private List<MaterialDedupGroup> materialGroups = new List<MaterialDedupGroup>();
+        private bool materialScanDone = false;
+        private bool deleteDedupAsset = false;   // 替换后是否删除 _dedup 材质资产
+        private Vector2 materialScrollPos;
+
+        /// <summary>材质球去重：某处对 _dedup 材质的引用</summary>
+        public class MaterialRef
+        {
+            public GameObject ownerObject;
+            public Renderer renderer;
+            public int materialIndex;
+        }
+
+        private class MaterialDedupGroup
+        {
+            public Material dedupMat;
+            public string dedupPath;
+            public Material originalMat;
+            public string originalPath;
+            public List<MaterialRef> refs = new List<MaterialRef>();
+            public bool identical;      // 参数是否完全一致
+            public bool animated;       // 是否被动画 K 帧驱动
+        }
+
+        private void DrawMaterialDedupTab(AnalysisSession session)
+        {
+            GUILayout.Label("材质球去重（_dedup 回收）", EditorStyles.boldLabel);
+            EditorGUILayout.HelpBox(
+                "当 _dedup 材质与同名的原材质【参数完全一致】且【未被动画 K 帧】时，可把引用替换回原材质。\n" +
+                "替换前会生成回档文件，可在「拓展 → 复制 → 回档」中还原。",
+                MessageType.Info);
+
+            if (session.Analyzers.Count == 0)
+            {
+                EditorGUILayout.HelpBox("请先在左侧「对象列表」中添加并分析对象，然后再执行扫描。", MessageType.Info);
+                return;
+            }
+
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("扫描 _dedup 材质（与原名材质对比）", GUILayout.Height(28)))
+            {
+                ScanMaterialDuplicates(session);
+            }
+            if (GUILayout.Button("清除结果", GUILayout.Height(28)))
+            {
+                materialGroups.Clear();
+                materialScanDone = false;
+            }
+            EditorGUILayout.EndHorizontal();
+
+            deleteDedupAsset = EditorGUILayout.Toggle("替换后删除 _dedup 材质资产（删除后该材质无法回档）", deleteDedupAsset);
+
+            EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+            if (!materialScanDone)
+            {
+                GUILayout.Label("状态: 未扫描");
+            }
+            else
+            {
+                int total = materialGroups.Count;
+                int ok = materialGroups.Count(g => g.identical && !g.animated);
+                GUILayout.Label($"状态: 候选 {total} 个，其中可合并 {ok} 个");
+            }
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.Space(5);
+
+            if (!materialScanDone)
+            {
+                GUILayout.Label("请执行扫描。", EditorStyles.centeredGreyMiniLabel);
+                return;
+            }
+
+            if (materialGroups.Count == 0)
+            {
+                GUILayout.Label("未发现 _dedup 材质（或找不到对应的原名材质）。", EditorStyles.centeredGreyMiniLabel);
+                return;
+            }
+
+            materialScrollPos = EditorGUILayout.BeginScrollView(materialScrollPos, GUILayout.ExpandHeight(true));
+            for (int i = 0; i < materialGroups.Count; i++)
+            {
+                DrawMaterialDedupGroup(materialGroups[i], i, session);
+            }
+            EditorGUILayout.EndScrollView();
+        }
+
+        private void DrawMaterialDedupGroup(MaterialDedupGroup g, int index, AnalysisSession session)
+        {
+            using (new UIHelper.ZebraScope(index))
+            {
+                EditorGUILayout.BeginVertical("box");
+
+                EditorGUILayout.BeginHorizontal();
+                EditorGUILayout.ObjectField(g.dedupMat, typeof(Material), false, GUILayout.Width(160));
+                GUILayout.Label("→", GUILayout.Width(16));
+                EditorGUILayout.ObjectField(g.originalMat, typeof(Material), false, GUILayout.Width(160));
+                GUILayout.FlexibleSpace();
+                GUILayout.Label($"{g.refs.Count} 处引用", EditorStyles.miniLabel);
+                EditorGUILayout.EndHorizontal();
+
+                EditorGUILayout.LabelField(
+                    $"{Path.GetFileName(g.dedupPath)}  →  {Path.GetFileName(g.originalPath)}",
+                    EditorStyles.miniLabel);
+
+                if (!g.identical)
+                    EditorGUILayout.HelpBox("参数不一致：不能合并（与原材质参数不同）。", MessageType.Warning);
+                else if (g.animated)
+                    EditorGUILayout.HelpBox("该材质被动画驱动（存在 K 帧）：不能合并，否则动画会失效。", MessageType.Warning);
+                else
+                    EditorGUILayout.HelpBox("参数完全一致且未被动画驱动，可安全合并回原名材质。", MessageType.Info);
+
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                EditorGUI.BeginDisabledGroup(!g.identical || g.animated);
+                if (GUILayout.Button("替换为原名材质", GUILayout.Width(140)))
+                {
+                    ReplaceMaterialGroup(g, session);
+                }
+                EditorGUI.EndDisabledGroup();
+                EditorGUILayout.EndHorizontal();
+
+                EditorGUILayout.EndVertical();
+                GUILayout.Space(4);
+            }
+        }
+
+        private void ScanMaterialDuplicates(AnalysisSession session)
+        {
+            materialGroups.Clear();
+            materialScanDone = true;
+
+            var dedupMaterials = new Dictionary<Material, List<MaterialRef>>();
+
+            foreach (var kvp in session.Analyzers)
+            {
+                var go = kvp.Key;
+                if (go == null) continue;
+
+                foreach (var renderer in go.GetComponentsInChildren<Renderer>(true))
+                {
+                    if (renderer == null || renderer.sharedMaterials == null) continue;
+                    var mats = renderer.sharedMaterials;
+                    for (int i = 0; i < mats.Length; i++)
+                    {
+                        var mat = mats[i];
+                        if (mat == null || string.IsNullOrEmpty(mat.name)) continue;
+                        if (!mat.name.EndsWith(DedupSuffix, StringComparison.OrdinalIgnoreCase)) continue;
+
+                        if (!dedupMaterials.ContainsKey(mat))
+                            dedupMaterials[mat] = new List<MaterialRef>();
+                        dedupMaterials[mat].Add(new MaterialRef
+                        {
+                            ownerObject = go,
+                            renderer = renderer,
+                            materialIndex = i
+                        });
+                    }
+                }
+            }
+
+            foreach (var kvp in dedupMaterials)
+            {
+                var dm = kvp.Key;
+                string dp = AssetDatabase.GetAssetPath(dm);
+
+                string origName;
+                if (!TryGetOriginalName(dm.name, out origName)) continue;
+
+                var om = FindOriginalMaterial(dp, origName);
+                if (om == null) continue;
+
+                string op = AssetDatabase.GetAssetPath(om);
+                bool identical = AreMaterialsIdentical(dm, om);
+                bool animated = kvp.Value.Any(r => IsObjectMaterialAnimated(r.ownerObject));
+
+                materialGroups.Add(new MaterialDedupGroup
+                {
+                    dedupMat = dm,
+                    dedupPath = dp,
+                    originalMat = om,
+                    originalPath = op,
+                    refs = kvp.Value,
+                    identical = identical,
+                    animated = animated
+                });
+            }
+
+            // 可合并的排前面
+            materialGroups = materialGroups
+                .OrderByDescending(g => g.identical && !g.animated)
+                .ThenBy(g => g.dedupMat != null ? g.dedupMat.name : "")
+                .ToList();
+        }
+
+        private bool TryGetOriginalName(string dedupName, out string originalName)
+        {
+            originalName = null;
+            if (string.IsNullOrEmpty(dedupName)) return false;
+            // 兼容 "X_dedup" 与 "X_dedup 1" 这类后缀
+            int idx = dedupName.LastIndexOf(DedupSuffix, StringComparison.OrdinalIgnoreCase);
+            if (idx <= 0) return false;
+            originalName = dedupName.Substring(0, idx);
+            return originalName.Length > 0;
+        }
+
+        private Material FindOriginalMaterial(string dedupPath, string originalName)
+        {
+            // 先找同目录下的同名材质
+            if (!string.IsNullOrEmpty(dedupPath))
+            {
+                string dir = Path.GetDirectoryName(dedupPath);
+                if (!string.IsNullOrEmpty(dir))
+                {
+                    dir = dir.Replace("\\", "/");
+                    var sameDir = AssetDatabase.LoadAssetAtPath<Material>($"{dir}/{originalName}.mat");
+                    if (sameDir != null) return sameDir;
+                }
+            }
+
+            // 再全局查找
+            foreach (var guid in AssetDatabase.FindAssets($"{originalName} t:Material"))
+            {
+                string p = AssetDatabase.GUIDToAssetPath(guid);
+                if (Path.GetFileNameWithoutExtension(p).Equals(originalName, StringComparison.OrdinalIgnoreCase))
+                {
+                    var m = AssetDatabase.LoadAssetAtPath<Material>(p);
+                    if (m != null) return m;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>两份材质是否所有参数完全一致（Shader / 渲染队列 / 关键字 / 全部属性）。</summary>
+        private bool AreMaterialsIdentical(Material a, Material b)
+        {
+            if (a == null || b == null) return false;
+            if (a.shader != b.shader) return false;
+            if (a.renderQueue != b.renderQueue) return false;
+
+            string[] ka = a.shaderKeywords;
+            string[] kb = b.shaderKeywords;
+            if ((ka == null) != (kb == null)) return false;
+            if (ka != null && kb != null)
+            {
+                if (ka.Length != kb.Length) return false;
+                foreach (var k in ka)
+                {
+                    if (!kb.Contains(k)) return false;
+                }
+            }
+
+            Shader shader = a.shader;
+            if (shader == null) return true;
+
+            int count = ShaderUtil.GetPropertyCount(shader);
+            for (int i = 0; i < count; i++)
+            {
+                string prop = ShaderUtil.GetPropertyName(shader, i);
+                switch (ShaderUtil.GetPropertyType(shader, i))
+                {
+                    case ShaderUtil.ShaderPropertyType.TexEnv:
+                        if (a.GetTexture(prop) != b.GetTexture(prop)) return false;
+                        break;
+                    case ShaderUtil.ShaderPropertyType.Color:
+                        if (a.GetColor(prop) != b.GetColor(prop)) return false;
+                        break;
+                    case ShaderUtil.ShaderPropertyType.Vector:
+                        if (a.GetVector(prop) != b.GetVector(prop)) return false;
+                        break;
+                    case ShaderUtil.ShaderPropertyType.Float:
+                    case ShaderUtil.ShaderPropertyType.Range:
+                        if (!Mathf.Approximately(a.GetFloat(prop), b.GetFloat(prop))) return false;
+                        break;
+                    case ShaderUtil.ShaderPropertyType.Int:
+                        if (a.GetInt(prop) != b.GetInt(prop)) return false;
+                        break;
+                }
+            }
+            return true;
+        }
+
+        /// <summary>对象（或其子对象）的动画是否驱动了材质参数。</summary>
+        private bool IsObjectMaterialAnimated(GameObject root)
+        {
+            if (root == null) return false;
+
+            foreach (var animator in root.GetComponentsInChildren<Animator>(true))
+            {
+                if (animator == null || animator.runtimeAnimatorController == null) continue;
+                foreach (var clip in animator.runtimeAnimatorController.animationClips)
+                {
+                    if (ClipAnimatesMaterial(clip)) return true;
+                }
+            }
+
+            foreach (var anim in root.GetComponentsInChildren<Animation>(true))
+            {
+                if (anim == null) continue;
+                foreach (AnimationState state in anim)
+                {
+                    if (state != null && state.clip != null && ClipAnimatesMaterial(state.clip))
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool ClipAnimatesMaterial(AnimationClip clip)
+        {
+            if (clip == null) return false;
+
+            foreach (var b in AnimationUtility.GetCurveBindings(clip))
+            {
+                if (IsMaterialPropertyName(b.propertyName)) return true;
+            }
+            foreach (var b in AnimationUtility.GetObjectReferenceCurveBindings(clip))
+            {
+                if (IsMaterialPropertyName(b.propertyName)) return true;
+            }
+            return false;
+        }
+
+        private bool IsMaterialPropertyName(string propertyName)
+        {
+            if (string.IsNullOrEmpty(propertyName)) return false;
+            return propertyName.IndexOf("material", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   propertyName.IndexOf("m_Materials", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private void ReplaceMaterialGroup(MaterialDedupGroup g, AnalysisSession session)
+        {
+            if (g == null || g.originalMat == null) return;
+            if (!g.identical)
+            {
+                EditorUtility.DisplayDialog("提示", "参数不一致，不能合并。", "确定");
+                return;
+            }
+            if (g.animated)
+            {
+                EditorUtility.DisplayDialog("提示", "该材质被动画驱动，不能合并。", "确定");
+                return;
+            }
+
+            if (!EditorUtility.DisplayDialog("确认替换",
+                $"将把 {g.refs.Count} 处对「{g.dedupMat.name}」的引用替换为「{g.originalMat.name}」。\n" +
+                (deleteDedupAsset ? "并删除 _dedup 材质资产（删除后该材质无法回档）。\n" : "") +
+                "\n替换前会生成回档文件。确定继续？", "确定", "取消"))
+                return;
+
+            // 回档快照（替换前）
+            var snapshot = RollbackStore.Capture(session, "材质球去重");
+
+            int changed = 0;
+            foreach (var r in g.refs)
+            {
+                if (r == null || r.renderer == null) continue;
+                var mats = r.renderer.sharedMaterials;
+                if (r.materialIndex < 0 || r.materialIndex >= mats.Length) continue;
+                if (mats[r.materialIndex] == g.originalMat) continue;
+
+                Undo.RecordObject(r.renderer, "材质球去重");
+                mats[r.materialIndex] = g.originalMat;
+                r.renderer.sharedMaterials = mats;
+                EditorUtility.SetDirty(r.renderer);
+                changed++;
+            }
+
+            AssetDatabase.SaveAssets();
+            string snapPath = RollbackStore.Save(snapshot);
+
+            string deleted = "";
+            if (deleteDedupAsset && g.dedupMat != null && !string.IsNullOrEmpty(g.dedupPath))
+            {
+                deleted = AssetDatabase.DeleteAsset(g.dedupPath)
+                    ? $"\n已删除 {Path.GetFileName(g.dedupPath)}"
+                    : $"\n删除 {Path.GetFileName(g.dedupPath)} 失败";
+            }
+
+            AssetDatabase.Refresh();
+
+            string msg = $"已将 {changed} 处引用替换为「{g.originalMat.name}」。{deleted}\n回档文件: {snapPath}";
+            Debug.Log($"[材质球去重] {msg}");
+            EditorUtility.DisplayDialog("替换完成", msg, "确定");
+
+            ScanMaterialDuplicates(session);
+        }
+
         public void Clear()
         {
             ClearResults();
+            materialGroups.Clear();
+            materialScanDone = false;
         }
 
         // ----- UI绘制 -----

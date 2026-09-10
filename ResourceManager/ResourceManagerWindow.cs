@@ -24,6 +24,7 @@ public class ResourceManagerWindow : EditorWindow
     private DeduplicateModule deduplicateModule;
     private ColorChangerModule colorChangerModule;
     private RedundancyModule redundancyModule;
+    private RollbackModule rollbackModule;
 
     // 状态指示器
     private StatusIndicator statusIndicator;
@@ -37,7 +38,7 @@ public class ResourceManagerWindow : EditorWindow
 
     // 拓展选项卡下拉选择
     private int extensionDropdownIndex = 0;
-    private static readonly string[] extensionModuleNames = { "改色", "动画", "复制", "去重", "冗余" };
+    private static readonly string[] extensionModuleNames = { "改色", "动画", "复制", "去重", "冗余", "回档" };
 
     // 条件设置UI相关
     private Vector2 objectListScroll;
@@ -69,6 +70,7 @@ public class ResourceManagerWindow : EditorWindow
         deduplicateModule = new DeduplicateModule();
         colorChangerModule = new ColorChangerModule();
         redundancyModule = new RedundancyModule();
+        rollbackModule = new RollbackModule();
 
         // 初始化状态指示器
         statusIndicator = new StatusIndicator();
@@ -299,6 +301,10 @@ public class ResourceManagerWindow : EditorWindow
                 redundancyModule.SearchFilter = searchText;
                 if (redundancyModule is IMultiObjectModule multiRedundancy)
                     multiRedundancy.DrawMultiObject(analysisSession, cache);
+                break;
+            case 5: // 回档
+                rollbackModule.SearchFilter = searchText;
+                rollbackModule.DrawMultiObject(analysisSession, cache);
                 break;
         }
     }
@@ -656,6 +662,7 @@ public class ResourceManagerWindow : EditorWindow
         deduplicateModule?.Clear();
         colorChangerModule?.Clear();
         redundancyModule?.Clear();
+        rollbackModule?.Clear();
 
         // 清空状态指示器
         statusIndicator?.ClearStatus();
