@@ -1,10 +1,7 @@
 {
     "name": "Editor",
     "rootNamespace": "Editor",
-    "references": [
-        "Unity.Timeline",
-        "Unity.Timeline.Editor"
-    ],
+    "references": [],
     "includePlatforms": [
         "Editor"
     ],
