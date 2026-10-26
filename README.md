@@ -40,6 +40,7 @@ TvT_Tools/
 | `TextureImportConfig.cs` | `Tools/TvTTools/贴图压缩格式/…` | 批量应用 / 预览贴图压缩格式设置 |
 | `BulkRenameWindow.cs` | `Tools/TvTTools/批量改名` | 批量重命名 |
 | `AnimationRenameWindow.cs` | `Tools/TvTTools/批量改名(动画保持)` | 批量改名，并同步修正动画绑定路径（动画不丢） |
+| `AnimationCopyWindow.cs` | `Tools/TvTTools/带动画复制` | 把 Hierarchy 中带动画（Animator / 旧版 Animation）的对象拖入窗口：在该对象子级下原地复制所选子对象、逐行改名，并把副本的关键帧轨道写入原 `.anim`（不新建 `.anim` / `.controller`）；可选复制本体或复制本体及材质（材质复制成独立 `.mat`，材质命名规则与对象独立设置，并可选择材质复制目录） |
 | `BatchClearMaterials.cs` | `Assets/TvTTools/去除模型材质` | 清除模型上的材质 / 材质贴图 |
 | `BatchFolderCreator.cs` | `Assets/TvTTools/文件夹/…` | 批量创建文件夹、快速创建特效资源文件夹、复制文件夹路径 |
 | `FolderTag.cs` | `Assets/TvTTools/文件夹标记/…`、`Window/文件夹标记管理器` | 在 Project 里给文件夹加彩色标记 |
