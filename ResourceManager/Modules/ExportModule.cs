@@ -271,6 +271,7 @@ namespace ResourceManager.Modules
             {
                 // 按资源类型分组公用资源
                 var commonResourcesByType = session.CommonResources.Keys
+                    .Where(r => r != null)
                     .Where(r => IsSupportedResourceType(r))
                     .Where(r => string.IsNullOrEmpty(SearchFilter) || r.name.ToLower().Contains(SearchFilter.ToLower()))
                     .GroupBy(r => r.GetType())
@@ -314,6 +315,7 @@ namespace ResourceManager.Modules
                 {
                     // 按资源类型分组
                     var resourcesByType = analyzer.ResourceUsage.Keys
+                        .Where(r => r != null)
                         .Where(r => IsSupportedResourceType(r))
                         .Where(r => string.IsNullOrEmpty(SearchFilter) || r.name.ToLower().Contains(SearchFilter.ToLower()))
                         .GroupBy(r => r.GetType())
@@ -372,8 +374,19 @@ namespace ResourceManager.Modules
             if (typeFoldouts[categoryKey])
             {
                 // 按文件夹路径分组
+                // 注意：场景中的材质实例、运行时创建的 Mesh 等没有资产路径，
+                // AssetDatabase.GetAssetPath 会返回空字符串；Mono 下
+                // Path.GetDirectoryName("") 会抛 ArgumentException: Invalid path，
+                // 异常发生在 IMGUI 布局中途，会导致整个窗口布局错乱。
                 var resourcesByFolder = resources
-                    .GroupBy(r => Path.GetDirectoryName(AssetDatabase.GetAssetPath(r)))
+                    .Where(r => r != null)
+                    .GroupBy(r =>
+                    {
+                        string assetPath = AssetDatabase.GetAssetPath(r);
+                        if (string.IsNullOrEmpty(assetPath)) return "未知路径";
+                        string folder = Path.GetDirectoryName(assetPath);
+                        return string.IsNullOrEmpty(folder) ? "未知路径" : folder;
+                    })
                     .OrderBy(g => g.Key);
 
                 foreach (var folderGroup in resourcesByFolder)

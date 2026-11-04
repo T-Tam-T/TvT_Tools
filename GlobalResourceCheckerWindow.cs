@@ -371,8 +371,18 @@ public class GlobalResourceCheckerWindow : EditorWindow
             if (typeFoldouts[categoryKey])
             {
                 // 按文件夹路径分组
+                // 场景中的材质实例、运行时创建的 Mesh 等没有资产路径，
+                // AssetDatabase.GetAssetPath 返回空字符串；Mono 下
+                // Path.GetDirectoryName("") 会抛 ArgumentException: Invalid path。
                 var resourcesByFolder = resourcesByType[type]
-                    .GroupBy(r => Path.GetDirectoryName(AssetDatabase.GetAssetPath(r)))
+                    .Where(r => r != null)
+                    .GroupBy(r =>
+                    {
+                        string assetPath = AssetDatabase.GetAssetPath(r);
+                        if (string.IsNullOrEmpty(assetPath)) return "未知路径";
+                        string folder = Path.GetDirectoryName(assetPath);
+                        return string.IsNullOrEmpty(folder) ? "未知路径" : folder;
+                    })
                     .OrderBy(g => g.Key);
 
                 foreach (var folderGroup in resourcesByFolder)
@@ -644,7 +654,12 @@ public class GlobalResourceCheckerWindow : EditorWindow
         // 计算文件夹问题统计
         foreach (var resource in allResources)
         {
-            string folderPath = Path.GetDirectoryName(AssetDatabase.GetAssetPath(resource)) ?? "未知路径";
+            if (resource == null) continue;
+
+            string assetPath = AssetDatabase.GetAssetPath(resource);
+            string folderPath = string.IsNullOrEmpty(assetPath) ? "未知路径" : Path.GetDirectoryName(assetPath);
+            if (string.IsNullOrEmpty(folderPath)) folderPath = "未知路径";
+
             if (!folderProblemCounts.ContainsKey(folderPath))
             {
                 folderProblemCounts[folderPath] = 0;
