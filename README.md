@@ -41,6 +41,7 @@ TvT_Tools/
 | `BulkRenameWindow.cs` | `Tools/TvTTools/批量改名` | 批量重命名 |
 | `AnimationRenameWindow.cs` | `Tools/TvTTools/批量改名(动画保持)` | 批量改名，并同步修正动画绑定路径（动画不丢） |
 | `AnimationCopyWindow.cs` | `Tools/TvTTools/带动画复制` | 把 Hierarchy 中带动画（Animator / 旧版 Animation）的对象拖入窗口：在该对象子级下原地复制所选子对象、逐行改名，并把副本的关键帧轨道写入原 `.anim`（不新建 `.anim` / `.controller`）；可选复制本体或复制本体及材质（材质复制成独立 `.mat`，材质命名规则与对象独立设置，并可选择材质复制目录） |
+| `AnimationTransferWindow.cs` | `Tools/TvTTools/动画转移` | 把 Hierarchy 中 A 的子物体复制到 B（可勾选、搜索、按组件过滤），并把 A 中这些对象的动画轨道重映射后合并进 B 的剪辑；剪辑优先按名称匹配，名称不同但两边唯一时自动配对，也可在“剪辑映射”里手动指定目标剪辑或“不转移”；目标缺少剪辑时可选新建 `.anim` 并加入 B 的 AnimatorController。播放模式下禁止执行 |
 | `BatchClearMaterials.cs` | `Assets/TvTTools/去除模型材质` | 清除模型上的材质 / 材质贴图 |
 | `BatchFolderCreator.cs` | `Assets/TvTTools/文件夹/…` | 批量创建文件夹、快速创建特效资源文件夹、复制文件夹路径 |
 | `FolderTag.cs` | `Assets/TvTTools/文件夹标记/…`、`Window/文件夹标记管理器` | 在 Project 里给文件夹加彩色标记 |
